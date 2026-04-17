@@ -1,0 +1,10 @@
+{
+  "model": "small",
+  "hotkey": "right alt",
+  "language": null,
+  "sample_rate": 16000,
+  "device": "cpu",
+  "compute_type": "int8",
+  "paste_method": "clipboard",
+  "min_audio_seconds": 0.5
+}

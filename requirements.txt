@@ -1,0 +1,22 @@
+# STT (Speech to text) dependencies
+# Install with:  pip install -r requirements.txt
+
+# ── Core transcription ────────────────────────────────────────────────────────
+faster-whisper>=1.0.3
+
+# ── Audio capture ─────────────────────────────────────────────────────────────
+sounddevice>=0.4.7
+numpy>=1.24.0
+
+# ── Global hotkey detection ───────────────────────────────────────────────────
+keyboard>=0.13.5
+
+# ── Clipboard / text injection ────────────────────────────────────────────────
+pyperclip>=1.9.0
+
+# ── System tray icon ──────────────────────────────────────────────────────────
+pystray>=0.19.5
+Pillow>=10.0.0
+
+# ── PyInstaller (packaging only — not needed to run the script) ───────────────
+# pyinstaller>=6.0.0
