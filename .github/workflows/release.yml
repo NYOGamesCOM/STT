@@ -81,6 +81,8 @@ jobs:
         shell: bash
         run: |
           pyinstaller ${{ matrix.build_args }} \
+            --noupx \
+            --collect-all numpy \
             --collect-all faster_whisper \
             --collect-all ctranslate2 \
             --collect-all onnxruntime \
