@@ -1,0 +1,128 @@
+name: Release
+
+# Triggered by pushing a tag like `v0.1.0`, or run manually from the Actions tab.
+# Builds STT for Windows / macOS / Linux with PyInstaller and attaches each
+# binary to a GitHub Release for that tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to release (must already exist, e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            asset: STT-windows-x64.exe
+            build_args: --onefile --noconsole --name STT
+          - name: macOS (arm64)
+            os: macos-latest
+            asset: STT-macos.zip
+            build_args: --onefile --windowed --name STT
+          - name: Linux x64
+            os: ubuntu-latest
+            asset: STT-linux-x64
+            build_args: --onefile --name STT
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # ── System dependencies ──────────────────────────────────────────────
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            portaudio19-dev \
+            python3-tk \
+            libcairo2-dev \
+            libgirepository1.0-dev \
+            gir1.2-gtk-3.0 \
+            gir1.2-ayatanaappindicator3-0.1 \
+            xclip
+
+      - name: Install macOS system deps
+        if: runner.os == 'macOS'
+        run: brew install portaudio
+
+      # ── Python dependencies ──────────────────────────────────────────────
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.10.0
+
+      # ── Build ────────────────────────────────────────────────────────────
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller ${{ matrix.build_args }} \
+            --collect-all faster_whisper \
+            --collect-all ctranslate2 \
+            --collect-all onnxruntime \
+            --collect-all tokenizers \
+            --noconfirm \
+            stt.py
+
+      # ── Stage artifact with a predictable name ───────────────────────────
+
+      - name: Stage Windows artifact
+        if: runner.os == 'Windows'
+        shell: bash
+        run: mv dist/STT.exe ${{ matrix.asset }}
+
+      - name: Stage Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          mv dist/STT ${{ matrix.asset }}
+          chmod +x ${{ matrix.asset }}
+
+      - name: Stage macOS artifact
+        if: runner.os == 'macOS'
+        run: |
+          cd dist && zip -r ../${{ matrix.asset }} STT.app
+
+      # ── Upload to release ────────────────────────────────────────────────
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          generate_release_notes: true
+          body: |
+            STT (Speech to text) — held-key push-to-talk voice-to-text, fully offline.
+
+            | Platform | Asset | Notes |
+            |---|---|---|
+            | Windows x64 | `STT-windows-x64.exe` | Run **as Administrator** (required for global hotkeys) |
+            | macOS (arm64) | `STT-macos.zip` | Unzip, then grant **Accessibility** in System Settings → Privacy & Security |
+            | Linux x64 | `STT-linux-x64` | Run with **`sudo`** (the `keyboard` library needs root on Linux) |
+
+            First launch downloads the Whisper `base` model (~150 MB) into your HuggingFace cache.
+
+            See the [README](https://github.com/NYOGamesCOM/STT#readme) for configuration and troubleshooting.

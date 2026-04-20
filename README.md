@@ -11,7 +11,24 @@ keys, no cloud, everything runs locally.
 
 ---
 
-## Quick-start
+## 📥 Download
+
+Pre-built binaries for the latest release — no Python install required.
+
+| Platform | Download | Run |
+|---|---|---|
+| **Windows 10/11 (x64)** | [**STT-windows-x64.exe**](https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-windows-x64.exe) | Right-click → **Run as administrator** (global hotkeys need it) |
+| **macOS (Apple Silicon)** | [**STT-macos.zip**](https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-macos.zip) | Unzip → grant **Accessibility** in System Settings → Privacy & Security |
+| **Linux (x64)** | [**STT-linux-x64**](https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-linux-x64) | `chmod +x STT-linux-x64 && sudo ./STT-linux-x64` |
+
+Browse every version on the [**Releases page**](https://github.com/NYOGamesCOM/STT/releases).
+
+> First launch downloads the Whisper `base` model (~150 MB) into your
+> HuggingFace cache. Everything after that is fully offline.
+
+---
+
+## Quick-start (from source)
 
 ### 1. Prerequisites
 
@@ -149,6 +166,50 @@ You may need to sign it: `codesign --deep --force --sign - dist/STT.app`
 `sys._MEIPASS` / `sys.frozen` and resolves `config.json` relative to the  
 **executable** (not the bundle's temp directory) so settings persist between  
 runs.
+
+---
+
+## Releasing (maintainers)
+
+Pre-built binaries for Windows, macOS, and Linux are produced automatically by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) whenever a
+`v*` tag is pushed.
+
+```bash
+# 1. Tag the commit you want to ship
+git tag v0.1.0
+git push origin v0.1.0
+
+# 2. GitHub Actions builds STT on windows-latest / macos-latest / ubuntu-latest
+#    and attaches the three binaries to a new release for that tag.
+#    Watch progress: https://github.com/NYOGamesCOM/STT/actions
+```
+
+Resulting release assets:
+
+| Asset | Platform | Build command |
+|---|---|---|
+| `STT-windows-x64.exe` | Windows 10/11 x64 | `pyinstaller --onefile --noconsole` |
+| `STT-macos.zip` | macOS (arm64) | `pyinstaller --onefile --windowed` |
+| `STT-linux-x64` | Linux x64 | `pyinstaller --onefile` |
+
+The workflow can also be triggered manually from the **Actions** tab
+(*Run workflow* → enter the tag name).
+
+### Permanent "latest" download URLs
+
+GitHub exposes a `releases/latest/download/<asset>` redirect that always points
+to the newest tagged release — use these on your website so links never go
+stale:
+
+```
+https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-windows-x64.exe
+https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-macos.zip
+https://github.com/NYOGamesCOM/STT/releases/latest/download/STT-linux-x64
+```
+
+Version-pinned URLs are also available at
+`releases/download/v0.1.0/<asset>` if you need reproducibility.
 
 ---
 

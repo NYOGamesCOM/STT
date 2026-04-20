@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(git -C /c/workplace/STT log --oneline -5)",
+      "Bash(.venv/Scripts/pyinstaller.exe --clean STT.spec)",
+      "Bash(tasklist)",
+      "Bash(.venv/Scripts/python.exe -c \"import py_compile; py_compile.compile\\('stt.py', doraise=True\\); print\\('OK'\\)\")",
+      "Read(//c/workplace/**)",
+      "Read(//c/workplace/marksoft/src/dashboard/templates/**)"
+    ]
+  }
+}
