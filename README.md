@@ -9,11 +9,14 @@ is pasted into whatever window is focused.
 Powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — no API  
 keys, no cloud, everything runs locally.
 
+🌐 **Project page:** [marksoft.ro/stt](https://marksoft.ro/stt)
+
 ---
 
 ## 📥 Download
 
 Pre-built binaries for the latest release — no Python install required.
+Or grab them from [marksoft.ro/stt](https://marksoft.ro/stt#download).
 
 | Platform | Download | Run |
 |---|---|---|
