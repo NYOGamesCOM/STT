@@ -78,9 +78,12 @@ DEFAULT_CONFIG: dict = {
     "min_audio_seconds": 0.5,     # Ignore recordings shorter than this
     "beam_size": 1,           # 1 = greedy (fastest); 5 = max accuracy
     "cpu_threads": 0,         # 0 = auto (use all available cores)
-    "persistent_mic": True,   # Keep mic stream open for instant-start recording
+    "persistent_mic": False,  # True = keep mic stream open (lower latency, but
+                              #        some Windows PyInstaller bundles capture silence)
     "vad_min_seconds": 3.0,   # Skip VAD for clips shorter than this (faster)
     "show_overlay": True,     # Bottom-center on-screen indicator
+    "show_main_window": True, # Open the main window on launch
+    "start_minimized": False, # Start in tray instead of showing the window
 }
 
 
@@ -1079,6 +1082,398 @@ class Overlay:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Main window  (optional desktop UI — close to tray, big record button,
+#                hotkey/model/language controls, live waveform, recent clips)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class MainWindow:
+    """
+    Dark-themed desktop window. Runs its own Tk root on a daemon thread.
+    All state updates from other threads go through `root.after(0, ...)`.
+
+    Callbacks (all optional):
+      on_record_toggle()  — click the big record button
+      on_change_hotkey()  — "Change" button next to hotkey label
+      on_model_change(m)  — model dropdown
+      on_language_change(l) — language dropdown
+      on_open_history()   — "Open full history" button
+      on_quit()           — File menu Quit
+    """
+
+    W, H = 480, 640
+
+    def __init__(
+        self,
+        *,
+        get_level,
+        get_state,
+        get_config,
+        get_recent_history,
+        on_record_toggle=None,
+        on_change_hotkey=None,
+        on_model_change=None,
+        on_language_change=None,
+        on_open_history=None,
+        on_quit=None,
+    ):
+        self._get_level = get_level
+        self._get_state = get_state
+        self._get_config = get_config
+        self._get_recent = get_recent_history
+        self._cb_record = on_record_toggle
+        self._cb_hotkey = on_change_hotkey
+        self._cb_model  = on_model_change
+        self._cb_lang   = on_language_change
+        self._cb_history = on_open_history
+        self._cb_quit   = on_quit
+
+        self._root = None
+        self._widgets: dict = {}
+        self._wave_phase = 0
+        self._last_state = None
+        self._last_hotkey = None
+        self._last_model = None
+        self._last_language = None
+        self._ready = threading.Event()
+
+        threading.Thread(target=self._run, name="main-window", daemon=True).start()
+        self._ready.wait(timeout=4.0)
+
+    # ── Tk thread ─────────────────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            log.error("tkinter unavailable — main window disabled.")
+            self._ready.set()
+            return
+
+        root = tk.Tk()
+        root.title("STT (Speech to text)")
+        root.configure(bg=_UI_BG)
+        root.geometry(f"{self.W}x{self.H}")
+        root.minsize(420, 540)
+
+        # Centre
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"+{(sw - self.W) // 2}+{(sh - self.H) // 2}")
+
+        # ── ttk dark style ───────────────────────────────────────────────
+        style = ttk.Style(root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(".", background=_UI_BG, foreground=_UI_FG,
+                        fieldbackground=_UI_BG2, bordercolor=_UI_BORDER,
+                        lightcolor=_UI_BG, darkcolor=_UI_BG)
+        style.configure("TFrame", background=_UI_BG)
+        style.configure("Card.TFrame", background=_UI_BG2)
+        style.configure("TLabel", background=_UI_BG, foreground=_UI_FG,
+                        font=("Segoe UI", 10))
+        style.configure("Dim.TLabel", background=_UI_BG, foreground=_UI_FG_DIM,
+                        font=("Segoe UI", 9))
+        style.configure("Title.TLabel", background=_UI_BG, foreground=_UI_FG,
+                        font=("Segoe UI Semibold", 16))
+        style.configure("TButton", background=_UI_BG3, foreground=_UI_FG,
+                        bordercolor=_UI_BORDER, focusthickness=0,
+                        padding=(10, 6), font=("Segoe UI", 10))
+        style.map("TButton", background=[("active", _UI_BORDER)])
+        style.configure("Accent.TButton", background=_UI_ACCENT, foreground="#ffffff")
+        style.map("Accent.TButton", background=[("active", "#2563eb")])
+        style.configure("TCombobox", fieldbackground=_UI_BG2, background=_UI_BG3,
+                        foreground=_UI_FG, arrowcolor=_UI_FG, bordercolor=_UI_BORDER)
+        root.option_add("*TCombobox*Listbox.background", _UI_BG2)
+        root.option_add("*TCombobox*Listbox.foreground", _UI_FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", _UI_ACCENT)
+        root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+        outer = ttk.Frame(root, style="TFrame")
+        outer.pack(fill="both", expand=True, padx=18, pady=16)
+
+        # ── Header ───────────────────────────────────────────────────────
+        header = ttk.Frame(outer, style="TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, text="STT", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text=" · Speech to text", style="Dim.TLabel"
+                  ).pack(side="left", pady=(4, 0))
+
+        # ── Status card ──────────────────────────────────────────────────
+        card = tk.Frame(outer, bg=_UI_BG2, highlightthickness=1,
+                        highlightbackground=_UI_BORDER)
+        card.pack(fill="x", pady=(14, 12))
+
+        status_row = tk.Frame(card, bg=_UI_BG2)
+        status_row.pack(fill="x", padx=16, pady=(14, 4))
+        dot = tk.Canvas(status_row, width=16, height=16, bg=_UI_BG2,
+                        highlightthickness=0, bd=0)
+        dot.pack(side="left", padx=(0, 10))
+        status_lbl = tk.Label(status_row, text="LOADING", bg=_UI_BG2, fg=_UI_FG,
+                              font=("Segoe UI Semibold", 13))
+        status_lbl.pack(side="left")
+
+        hint_lbl = tk.Label(
+            card, text="Getting ready…",
+            bg=_UI_BG2, fg=_UI_FG_DIM, font=("Segoe UI", 10),
+            anchor="w",
+        )
+        hint_lbl.pack(fill="x", padx=16, pady=(0, 4))
+
+        # Live waveform canvas
+        wave = tk.Canvas(card, height=42, bg=_UI_BG2,
+                         highlightthickness=0, bd=0)
+        wave.pack(fill="x", padx=12, pady=(4, 14))
+
+        # ── Big record button ────────────────────────────────────────────
+        rec_btn = tk.Button(
+            outer, text="●  Click or hold Right Alt to record",
+            bg=_UI_ACCENT, fg="#ffffff", activebackground="#2563eb",
+            activeforeground="#ffffff", bd=0, relief="flat",
+            font=("Segoe UI Semibold", 11),
+            cursor="hand2",
+            command=lambda: self._cb_record and self._cb_record(),
+        )
+        rec_btn.pack(fill="x", ipady=12, pady=(0, 14))
+
+        # ── Settings rows ────────────────────────────────────────────────
+        def row(parent, label_text):
+            r = ttk.Frame(parent, style="TFrame")
+            r.pack(fill="x", pady=(0, 8))
+            ttk.Label(r, text=label_text, style="Dim.TLabel", width=10
+                      ).pack(side="left")
+            return r
+
+        # Hotkey
+        hot_row = row(outer, "Hotkey")
+        hk_val = tk.Label(hot_row, text="—", bg=_UI_BG, fg=_UI_FG,
+                          font=("Segoe UI Semibold", 10))
+        hk_val.pack(side="left")
+        ttk.Button(hot_row, text="Change",
+                   command=lambda: self._cb_hotkey and self._cb_hotkey()
+                   ).pack(side="right")
+
+        # Model
+        mod_row = row(outer, "Model")
+        mod_var = tk.StringVar(value="base")
+        mod_cb = ttk.Combobox(mod_row, textvariable=mod_var, state="readonly",
+                              values=["tiny", "base", "small"], width=12)
+        mod_cb.pack(side="left")
+        mod_cb.bind("<<ComboboxSelected>>",
+                    lambda _e: self._cb_model and self._cb_model(mod_var.get()))
+
+        # Language
+        lang_row = row(outer, "Language")
+        lang_var = tk.StringVar(value="en")
+        lang_cb = ttk.Combobox(
+            lang_row, textvariable=lang_var, state="readonly",
+            values=["auto", "en", "ro", "fr", "de", "es", "it", "pt", "nl", "pl", "ja", "zh"],
+            width=12,
+        )
+        lang_cb.pack(side="left")
+        lang_cb.bind("<<ComboboxSelected>>",
+                     lambda _e: self._cb_lang and self._cb_lang(lang_var.get()))
+
+        # ── Recent history ───────────────────────────────────────────────
+        ttk.Label(outer, text="Recent", style="Dim.TLabel"
+                  ).pack(anchor="w", pady=(10, 6))
+
+        hist_frame = tk.Frame(outer, bg=_UI_BG2, highlightthickness=1,
+                              highlightbackground=_UI_BORDER)
+        hist_frame.pack(fill="both", expand=True)
+        hist_sb = tk.Scrollbar(hist_frame, bg=_UI_BG2, troughcolor=_UI_BG,
+                               activebackground=_UI_BG3)
+        hist_sb.pack(side="right", fill="y")
+        hist = tk.Listbox(
+            hist_frame, bg=_UI_BG2, fg=_UI_FG,
+            selectbackground=_UI_ACCENT, selectforeground="#ffffff",
+            highlightthickness=0, bd=0, activestyle="none",
+            font=("Segoe UI", 9), yscrollcommand=hist_sb.set,
+        )
+        hist.pack(side="left", fill="both", expand=True)
+        hist_sb.config(command=hist.yview)
+
+        def _copy_selected(_e=None):
+            sel = hist.curselection()
+            if not sel:
+                return
+            # Entries are stored as tuples in self._widgets["hist_data"]
+            data = self._widgets.get("hist_data") or []
+            i = sel[0]
+            if 0 <= i < len(data):
+                try:
+                    pyperclip.copy(data[i].get("text", ""))
+                except Exception:
+                    pass
+        hist.bind("<Double-Button-1>", _copy_selected)
+        hist.bind("<Return>", _copy_selected)
+
+        bottom_row = ttk.Frame(outer, style="TFrame")
+        bottom_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(bottom_row, text="Open full history…",
+                   command=lambda: self._cb_history and self._cb_history()
+                   ).pack(side="left")
+        ttk.Button(bottom_row, text="Minimize to tray",
+                   command=self.hide).pack(side="right")
+
+        # ── Footer ───────────────────────────────────────────────────────
+        footer = ttk.Frame(outer, style="TFrame")
+        footer.pack(fill="x", pady=(12, 0))
+        ttk.Label(footer, text="Powered by ", style="Dim.TLabel").pack(side="left")
+        link = tk.Label(footer, text="MarkSoft", bg=_UI_BG, fg=_UI_ACCENT,
+                        cursor="hand2", font=("Segoe UI", 9, "underline"))
+        link.pack(side="left")
+        import webbrowser
+        link.bind("<Button-1>", lambda _e: webbrowser.open(MARKSOFT_URL))
+        ttk.Label(footer, text=f"  ·  {MARKSOFT_URL}",
+                  style="Dim.TLabel").pack(side="left")
+
+        # ── State stash + bindings ───────────────────────────────────────
+        self._root = root
+        self._widgets = {
+            "dot": dot, "status": status_lbl, "hint": hint_lbl,
+            "wave": wave, "rec_btn": rec_btn,
+            "hk_val": hk_val, "mod_var": mod_var, "lang_var": lang_var,
+            "hist": hist, "hist_data": [],
+        }
+
+        # Close (X) = hide to tray, not quit
+        root.protocol("WM_DELETE_WINDOW", self.hide)
+        root.bind("<Escape>", lambda _e: self.hide())
+
+        self._ready.set()
+        self._tick()
+        try:
+            root.mainloop()
+        except Exception as exc:
+            log.debug("Main window mainloop ended: %s", exc)
+
+    # ── Drawing / polling ─────────────────────────────────────────────────────
+
+    _STATE_COLORS = {
+        "LOADING_MODEL": ("#6b80ff", "Loading model…"),
+        "IDLE":          ("#5ad48e", "Ready — hold Right Alt or click record."),
+        "RECORDING":     ("#ef4444", "Recording — release to transcribe."),
+        "TRANSCRIBING":  ("#f59e0b", "Transcribing…"),
+    }
+
+    def _tick(self) -> None:
+        import math
+        if self._root is None:
+            return
+        w = self._widgets
+
+        # State
+        st = self._get_state()
+        st_name = getattr(st, "name", str(st))
+        color, hint = self._STATE_COLORS.get(st_name, ("#8a93a2", ""))
+        if st_name != self._last_state:
+            self._last_state = st_name
+            dot = w["dot"]
+            dot.delete("all")
+            dot.create_oval(2, 2, 14, 14, fill=color, outline="")
+            w["status"].config(text=st_name.replace("_", " "), fg=color)
+            w["hint"].config(text=hint)
+            if st_name == "RECORDING":
+                w["rec_btn"].config(
+                    text="■  Recording…  (release or click to stop)",
+                    bg="#ef4444", activebackground="#dc2626",
+                )
+            else:
+                w["rec_btn"].config(
+                    text="●  Click or hold Right Alt to record",
+                    bg=_UI_ACCENT, activebackground="#2563eb",
+                )
+
+        # Config-driven labels
+        cfg = self._get_config() or {}
+        hk = cfg.get("hotkey", "—")
+        if hk != self._last_hotkey:
+            self._last_hotkey = hk
+            w["hk_val"].config(text=hk)
+        model = cfg.get("model", "base")
+        if model != self._last_model:
+            self._last_model = model
+            w["mod_var"].set(model)
+        lang = cfg.get("language") or "auto"
+        if lang != self._last_language:
+            self._last_language = lang
+            w["lang_var"].set(lang)
+
+        # Waveform
+        self._wave_phase += 1
+        wave = w["wave"]
+        wave.delete("all")
+        cw = int(wave.winfo_width()) or (self.W - 80)
+        ch = int(wave.winfo_height()) or 42
+        bars = 28
+        gap = 3
+        bw = max(2, (cw - gap * (bars - 1)) // bars)
+        if st_name == "RECORDING":
+            level = max(0.08, min(1.0, self._get_level()))
+            col = "#ef4444"
+        else:
+            level = 0.12
+            col = _UI_BG3
+        for i in range(bars):
+            amp = (0.25 + 0.75 * abs(math.sin(self._wave_phase / 3.0 + i * 0.7))) * level
+            bh = max(3, int(amp * (ch - 8)))
+            x = i * (bw + gap)
+            y0 = (ch - bh) // 2
+            wave.create_rectangle(x, y0, x + bw, y0 + bh, fill=col, outline="")
+
+        # History (update every ~1 s to keep it cheap)
+        if self._wave_phase % 30 == 0:
+            try:
+                entries = self._get_recent() or []
+            except Exception:
+                entries = []
+            hist = w["hist"]
+            hist.delete(0, "end")
+            for e in entries[:10]:
+                ts = (e.get("ts") or "")[11:16]  # HH:MM
+                txt = (e.get("text") or "").replace("\n", " ")
+                if len(txt) > 60:
+                    txt = txt[:57] + "…"
+                hist.insert("end", f"{ts}   {txt}")
+            w["hist_data"] = entries[:10]
+
+        wave.after(33, self._tick)
+
+    # ── Public (thread-safe) ──────────────────────────────────────────────────
+
+    def show(self) -> None:
+        if self._root is None:
+            return
+        def _apply():
+            self._root.deiconify()
+            self._root.lift()
+            self._root.focus_force()
+        try:
+            self._root.after(0, _apply)
+        except Exception:
+            pass
+
+    def hide(self) -> None:
+        if self._root is None:
+            return
+        try:
+            self._root.after(0, self._root.withdraw)
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        if self._root is None:
+            return
+        try:
+            self._root.after(0, self._root.destroy)
+        except Exception:
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Main application
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1103,6 +1498,7 @@ class STTApp:
 
         # On-screen overlay (created lazily in run() so Tk starts cleanly)
         self.overlay: Overlay | None = None
+        self.main_window: MainWindow | None = None
 
         # Keyboard state
         self._recording_active = False     # True while hotkey is held down
@@ -1229,6 +1625,51 @@ class STTApp:
 
     # ── Hotkey callbacks ──────────────────────────────────────────────────────
 
+    # ── UI-initiated config changes ───────────────────────────────────────────
+
+    def _ui_change_hotkey(self) -> None:
+        def on_set(new_key: str):
+            self.config["hotkey"] = new_key
+            save_config(self.config)
+            self._register_hotkey()
+            self._notify(f"Hotkey updated → '{new_key}'")
+        threading.Thread(
+            target=show_hotkey_dialog,
+            args=(self.config["hotkey"], on_set),
+            daemon=True,
+        ).start()
+
+    def _ui_change_model(self, name: str) -> None:
+        if self.config.get("model") == name:
+            return
+        if self.state != AppState.IDLE:
+            self._notify("Finish the current operation first.")
+            return
+        self.config["model"] = name
+        save_config(self.config)
+        self.transcriber = self._make_transcriber()
+        self._load_model()
+        if self.icon:
+            try:
+                self.icon.update_menu()
+            except Exception:
+                pass
+
+    def _ui_change_language(self, lang: str) -> None:
+        new = None if lang == "auto" else lang
+        if self.config.get("language") == new:
+            return
+        self.config["language"] = new
+        save_config(self.config)
+        self._notify(f"Language → {lang}")
+
+    def toggle_record(self) -> None:
+        """UI entry point: click-to-toggle record (alternative to hotkey)."""
+        if self._recording_active:
+            self._on_release()
+        else:
+            self._on_press()
+
     def _on_press(self) -> None:
         if self._recording_active:
             return  # Hold repeat — ignore
@@ -1321,6 +1762,10 @@ class STTApp:
                     self.icon.update_menu()
             return action
 
+        def _show_window(icon, item):
+            if self.main_window is not None:
+                self.main_window.show()
+
         def _open_history(icon, item):
             threading.Thread(target=show_history_window,
                              name="history-window", daemon=True).start()
@@ -1350,6 +1795,8 @@ class STTApp:
                 action=None,
                 enabled=False,
             ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Show window", _show_window, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Model",
@@ -1396,6 +1843,29 @@ class STTApp:
                 log.warning("Overlay init failed: %s", exc)
                 self.overlay = None
 
+        # Main desktop window (optional)
+        if self.config.get("show_main_window", True):
+            try:
+                self.main_window = MainWindow(
+                    get_level=lambda: self.recorder.level,
+                    get_state=lambda: self.state,
+                    get_config=lambda: self.config,
+                    get_recent_history=load_history,
+                    on_record_toggle=self.toggle_record,
+                    on_change_hotkey=self._ui_change_hotkey,
+                    on_model_change=self._ui_change_model,
+                    on_language_change=self._ui_change_language,
+                    on_open_history=lambda: threading.Thread(
+                        target=show_history_window, daemon=True
+                    ).start(),
+                    on_quit=lambda: self.icon and self.icon.stop(),
+                )
+                if self.config.get("start_minimized", False):
+                    self.main_window.hide()
+            except Exception as exc:
+                log.warning("Main window init failed: %s", exc)
+                self.main_window = None
+
         self._register_hotkey()
         self._load_model()
 
@@ -1416,6 +1886,8 @@ class STTApp:
                 pass
             if self.overlay is not None:
                 self.overlay.shutdown()
+            if self.main_window is not None:
+                self.main_window.shutdown()
         log.info("STT (Speech to text) shut down.")
 
 
