@@ -229,6 +229,15 @@ Version-pinned URLs are also available at
 
 ---
 
+## Contributors
+
+- **[NYOGamesCOM](https://github.com/NYOGamesCOM)** — creator & maintainer
+- **[Claude](https://claude.com/claude-code)** (Anthropic Opus 4.7) — overlay indicator, history UI, performance pass, build/release plumbing
+
+Built with ❤️ by [MarkSoft](https://marksoft.ro).
+
+---
+
 ## License
 
 MIT – do whatever you like.
