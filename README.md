@@ -29,6 +29,22 @@ Browse every version on the [**Releases page**](https://github.com/NYOGamesCOM/S
 > First launch downloads the Whisper `base` model (~150 MB) into your
 > HuggingFace cache. Everything after that is fully offline.
 
+### Windows SmartScreen warning
+
+On first launch Windows shows *"Windows protected your PC — unrecognized app."*
+This happens because the exe isn't code-signed (signing certs cost ~$100–500/yr
+for an open-source hobby project, so for now it's unsigned).
+
+**To run it anyway — once per version:**
+
+1. In the blue SmartScreen dialog, click **More info** (under the big message).
+2. A new **Run anyway** button appears in the bottom-right. Click it.
+3. Windows remembers your choice; subsequent launches skip the dialog.
+
+The exe is built in public on GitHub Actions — you can inspect every build step
+at the [Actions tab](https://github.com/NYOGamesCOM/STT/actions) and compute the
+checksum yourself against what Actions produced.
+
 ---
 
 ## Quick-start (from source)

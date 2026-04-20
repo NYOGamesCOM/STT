@@ -28,7 +28,7 @@ jobs:
           - name: Windows x64
             os: windows-latest
             asset: STT-windows-x64.exe
-            build_args: --onefile --noconsole --name STT
+            build_args: --onefile --noconsole --name STT --version-file version_info.txt
           - name: macOS (arm64)
             os: macos-latest
             asset: STT-macos.zip
