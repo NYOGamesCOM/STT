@@ -5,6 +5,25 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.2.3 · 2026-04-21 — Show-window fixes + native title bar escape hatch
+
+### 🐛 Fixed
+- Clicking **Show window** in the tray menu now reliably restores the
+  main window from every hidden state (withdrawn, iconified, or
+  minimised via the Win32 API) — 5-step restore: deiconify →
+  `ShowWindow(SW_RESTORE/SW_SHOW)` → recentre if off-screen →
+  topmost-flash → `SetForegroundWindow`.
+- Debug log now records every show / restore attempt so any remaining
+  edge case can be diagnosed from `stt.log`.
+- Reverted the minimise button to Tk's `iconify()` — the restore path
+  handles every entry state, no need for a bespoke minimise flavour.
+
+### ✨ New
+- `use_native_titlebar` config option as an escape hatch. Set it to
+  `true` in `config.json` to fall back to the native Windows title bar
+  (dark on Windows 11 via DWM, white on Windows 10). The custom
+  title bar remains the default.
+
 ## v0.2.2 · 2026-04-21 — Reliable minimize & restore
 
 ### 🐛 Fixed

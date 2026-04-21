@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -87,6 +87,9 @@ DEFAULT_CONFIG: dict = {
     "show_main_window": True, # Open the main window on launch
     "start_minimized": False, # Start in tray instead of showing the window
     "last_seen_version": "", # Used to trigger the "What's new" card once per update
+    "use_native_titlebar": False, # Fall back to the native Windows title bar
+                                  # (white on Win 10, dark on Win 11 via DWM)
+                                  # if the custom bar misbehaves on your machine.
 }
 
 
@@ -1748,7 +1751,27 @@ class MainWindow:
         root.title(f"STT by MarkSoft")
         root.configure(bg=self.BG)
         root.geometry(f"{self.W}x{self.H}")
-        root.overrideredirect(True)
+
+        cfg = (self._get_config() or {})
+        self._native_titlebar = bool(cfg.get("use_native_titlebar", False))
+        if not self._native_titlebar:
+            root.overrideredirect(True)
+        else:
+            # Try to darken the native title bar on Windows 11
+            try:
+                import ctypes
+                from ctypes import wintypes
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or \
+                       root.winfo_id()
+                value = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd),
+                    ctypes.c_uint(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                    ctypes.byref(value), ctypes.sizeof(value),
+                )
+            except Exception as exc:
+                log.debug("DWM dark title bar skipped: %s", exc)
         root.minsize(420, 480)
 
         # Position: centred on the primary monitor
@@ -1760,7 +1783,8 @@ class MainWindow:
         self._set_window_icon(root)
 
         # Make an override-redirect window appear in the taskbar + Alt-Tab
-        root.after(10, lambda: self._make_appear_in_taskbar(root))
+        if not self._native_titlebar:
+            root.after(10, lambda: self._make_appear_in_taskbar(root))
 
         # ── ttk base style — proper dark theme, including Combobox ───────
         style = ttk.Style(root)
@@ -1809,8 +1833,9 @@ class MainWindow:
 
         # ── Build the UI ─────────────────────────────────────────────────
         self._root = root
-        self._build_title_bar(root)
-        tk.Frame(root, bg=self.BORDER_SOFT, height=1).pack(fill="x", side="top")
+        if not self._native_titlebar:
+            self._build_title_bar(root)
+            tk.Frame(root, bg=self.BORDER_SOFT, height=1).pack(fill="x", side="top")
 
         body = tk.Frame(root, bg=self.BG)
         body.pack(fill="both", expand=True, side="top")
@@ -1826,6 +1851,10 @@ class MainWindow:
 
         root.bind("<Escape>", lambda _e: self._escape_key())
         root.bind("<Configure>", self._on_configure)
+        # Native mode: the window-manager close button should hide to tray,
+        # not terminate the app (matches the custom-titlebar × behaviour).
+        if self._native_titlebar:
+            root.protocol("WM_DELETE_WINDOW", self.hide)
 
         self._ready.set()
         self._tick()
@@ -1939,20 +1968,9 @@ class MainWindow:
         self._root.geometry(f"+{event.x_root - ox}+{event.y_root - oy}")
 
     def _minimize(self) -> None:
-        # For overrideredirect windows on Windows, Tk's iconify() is flaky —
-        # go straight through the Win32 API so 'Show window' / SW_RESTORE
-        # can reliably bring it back.
-        try:
-            import ctypes
-            hwnd = self._root.winfo_id()
-            parent = ctypes.windll.user32.GetParent(hwnd)
-            if parent:
-                hwnd = parent
-            SW_MINIMIZE = 6
-            ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
-            return
-        except Exception as exc:
-            log.debug("ctypes minimize skipped: %s", exc)
+        # Use Tk's iconify — our show() path handles every restoration case
+        # (withdrawn, iconified, minimised-via-SW_MINIMIZE) via both deiconify
+        # and ShowWindow, so there's no need for a bespoke minimise path.
         try:
             self._root.iconify()
         except Exception:
@@ -2512,41 +2530,81 @@ class MainWindow:
     # ── Public (thread-safe) ──────────────────────────────────────────────────
 
     def show(self) -> None:
+        log.info("MainWindow.show() requested")
         if self._root is None:
+            log.warning("MainWindow.show(): _root is None — window thread may have died")
             return
 
         def _apply():
-            # deiconify() alone is unreliable for overrideredirect windows
-            # that were iconified or hidden via ShowWindow — layer ctypes.
+            # 1. Un-withdraw / un-iconify at the Tk level
             try:
                 self._root.deiconify()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("deiconify failed: %s", exc)
+
+            # 2. Drive Windows API — handles SW_MINIMIZE and SW_HIDE states
+            hwnd = 0
             try:
                 import ctypes
                 hwnd = self._root.winfo_id()
-                # Fall back to the parent HWND if Tk wraps us for some reason
                 parent = ctypes.windll.user32.GetParent(hwnd)
                 if parent:
                     hwnd = parent
+                SW_SHOW    = 5
                 SW_RESTORE = 9
                 ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
-                try:
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
+                ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
             except Exception as exc:
-                log.debug("show() ctypes restore skipped: %s", exc)
+                log.debug("ShowWindow failed: %s", exc)
+
+            # 3. Reposition if the window drifted off-screen (some minimize paths
+            #    leave it at -32000,-32000). Recenter on the primary monitor.
+            try:
+                self._root.update_idletasks()
+                x  = self._root.winfo_x()
+                y  = self._root.winfo_y()
+                sw = self._root.winfo_screenwidth()
+                sh = self._root.winfo_screenheight()
+                if x < -100 or y < -100 or x > sw - 50 or y > sh - 50:
+                    w = self._root.winfo_width()  or self.W
+                    h = self._root.winfo_height() or self.H
+                    self._root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+                    log.info("Window was off-screen (%d,%d); recentred", x, y)
+            except Exception as exc:
+                log.debug("recenter failed: %s", exc)
+
+            # 4. Topmost-flash to punch through whatever has focus right now
+            try:
+                self._root.attributes("-topmost", True)
+                self._root.update_idletasks()
+                self._root.attributes("-topmost", False)
+            except Exception:
+                pass
+
+            # 5. Lift / focus / SetForegroundWindow — the usual dance
             try:
                 self._root.lift()
                 self._root.focus_force()
             except Exception:
                 pass
+            if hwnd:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+
+            try:
+                state = self._root.state()
+                geom  = self._root.geometry()
+                log.info("MainWindow restored — state=%s, geom=%s", state, geom)
+            except Exception:
+                pass
 
         try:
             self._root.after(0, _apply)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("show after() failed: %s", exc)
 
     def hide(self) -> None:
         if self._root is None:
