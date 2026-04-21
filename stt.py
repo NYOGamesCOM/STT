@@ -896,29 +896,43 @@ def show_history_window() -> None:
 
 class Overlay:
     """
-    Small, borderless, always-on-top, click-through pill shown at the bottom
-    centre of the primary monitor while recording/transcribing.
+    Liquid-glass pill shown at the bottom centre while recording/transcribing.
 
-    Owns its own Tk root and mainloop on a dedicated daemon thread — all
-    state changes from other threads are marshalled via `root.after(0, ...)`.
+    - True transparent rounded corners on Windows (via -transparentcolor).
+    - Click-through (WS_EX_TRANSPARENT) and hidden from Alt-Tab.
+    - Smooth scrolling bezier waveform mirrored top/bottom while recording.
+    - Pulsing status dot on the left, monospace elapsed timer on the right.
+
+    Owns its own Tk root + mainloop on a dedicated daemon thread; every
+    state change from other threads is marshalled via `root.after(0, ...)`.
     """
 
-    W, H = 150, 42                       # Pill size
-    MARGIN_BOTTOM = 60                   # Gap above taskbar
-    BG       = "#14161a"
-    FG_IDLE  = "#7a8290"
-    FG_REC   = "#ef4444"
-    FG_TRANS = "#f59e0b"
+    W, H = 220, 40                       # Pill size
+    MARGIN_BOTTOM = 56                   # Gap above taskbar
+    LEVELS_N = 64                        # Rolling waveform sample buffer
+
+    # Palette
+    BG        = "#0e1014"
+    HL        = "#1d222c"                # 1-px inner top highlight
+    FG_DIM    = "#6b7280"
+    FG_REC    = "#ff4d60"
+    FG_REC_GL = "#ff7a88"                # glow ring
+    FG_TRANS  = "#f7a940"
+    FG_LOAD   = "#7cc4ff"
+    # Windows transparency key — any pixel this exact color becomes see-through
+    KEY       = "#ff00ff"
 
     def __init__(self, get_level):
-        self._get_level = get_level      # callable → float in [0, 1]
+        self._get_level = get_level
         self._state = "hidden"           # "hidden" | "recording" | "transcribing"
         self._root = None
         self._canvas = None
         self._phase = 0
+        self._rec_start = 0.0
+        self._levels: list[float] = [0.0] * self.LEVELS_N
+        self._transparent_ok = False
         self._ready = threading.Event()
-        self._t = threading.Thread(target=self._run, name="overlay", daemon=True)
-        self._t.start()
+        threading.Thread(target=self._run, name="overlay", daemon=True).start()
         self._ready.wait(timeout=3.0)
 
     # ── Tk thread ─────────────────────────────────────────────────────────────
@@ -936,22 +950,32 @@ class Overlay:
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.attributes("-alpha", 0.0)
-        root.configure(bg=self.BG)
 
-        sw = root.winfo_screenwidth()
-        sh = root.winfo_screenheight()
+        # Try true transparent corners (Windows). Fallback: opaque pill.
+        try:
+            root.configure(bg=self.KEY)
+            root.attributes("-transparentcolor", self.KEY)
+            self._transparent_ok = True
+        except Exception:
+            root.configure(bg=self.BG)
+            self._transparent_ok = False
+
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         x = (sw - self.W) // 2
         y = sh - self.H - self.MARGIN_BOTTOM
         root.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
-        canvas = tk.Canvas(root, width=self.W, height=self.H, bg=self.BG,
-                           highlightthickness=0, bd=0)
+        canvas_bg = self.KEY if self._transparent_ok else self.BG
+        canvas = tk.Canvas(
+            root, width=self.W, height=self.H, bg=canvas_bg,
+            highlightthickness=0, bd=0,
+        )
         canvas.pack(fill="both", expand=True)
 
         self._root = root
         self._canvas = canvas
 
-        # Windows: make the window click-through and hide from Alt-Tab
+        # Click-through + hide from Alt-Tab (Windows)
         try:
             import ctypes
             hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
@@ -976,15 +1000,33 @@ class Overlay:
         except Exception as exc:
             log.debug("Overlay mainloop ended: %s", exc)
 
+    # ── Color helper (blend hex → bg for faux-alpha glows) ────────────────────
+
+    @staticmethod
+    def _mix(hex_a: str, hex_b: str, t: float) -> str:
+        ar, ag, ab = int(hex_a[1:3], 16), int(hex_a[3:5], 16), int(hex_a[5:7], 16)
+        br, bg_, bb = int(hex_b[1:3], 16), int(hex_b[3:5], 16), int(hex_b[5:7], 16)
+        r = int(ar + (br - ar) * t)
+        g = int(ag + (bg_ - ag) * t)
+        b = int(ab + (bb - ab) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw_pill(self) -> None:
         c = self._canvas
         W, H = self.W, self.H
         r = H // 2
+        # Pill body
         c.create_oval(0, 0, 2 * r, H, fill=self.BG, outline="")
         c.create_oval(W - 2 * r, 0, W, H, fill=self.BG, outline="")
         c.create_rectangle(r, 0, W - r, H, fill=self.BG, outline="")
+        # 1-px inner top highlight — the "glass" shine
+        c.create_arc(1, 1, 2 * r - 1, H - 1, start=45, extent=90,
+                     style="arc", outline=self.HL, width=1)
+        c.create_arc(W - 2 * r + 1, 1, W - 1, H - 1, start=45, extent=90,
+                     style="arc", outline=self.HL, width=1)
+        c.create_line(r, 1, W - r, 1, fill=self.HL)
 
     def _tick(self) -> None:
         import math
@@ -994,41 +1036,100 @@ class Overlay:
         self._phase += 1
         st = self._state
 
-        if st != "hidden":
-            c = self._canvas
-            c.delete("all")
-            self._draw_pill()
-            W, H = self.W, self.H
+        if st == "hidden":
+            # Keep the loop alive so re-show renders immediately
+            self._canvas.after(33, self._tick)
+            return
 
-            if st == "recording":
-                level = max(0.08, min(1.0, self._get_level()))
-                bars, bw, gap = 9, 3, 4
-                total = bars * bw + (bars - 1) * gap
-                x0 = (W - total) // 2
-                cy = H // 2
-                phase = self._phase / 3.0
-                for i in range(bars):
-                    amp = (0.25 + 0.75 * abs(math.sin(phase + i * 0.8))) * level
-                    bh = max(4, int(amp * (H - 16)))
-                    x = x0 + i * (bw + gap)
-                    c.create_rectangle(
-                        x, cy - bh // 2, x + bw, cy + bh // 2,
-                        fill=self.FG_REC, outline="",
-                    )
+        c = self._canvas
+        c.delete("all")
+        W, H = self.W, self.H
+        cy = H // 2
 
-            elif st == "transcribing":
-                cy = H // 2
-                phase = self._phase / 5.0
-                for i in range(3):
-                    amp = 0.5 + 0.5 * math.sin(phase + i * 0.9)
-                    size = 3 + int(amp * 4)
-                    x = W // 2 + (i - 1) * 16
-                    c.create_oval(
-                        x - size, cy - size, x + size, cy + size,
-                        fill=self.FG_TRANS, outline="",
-                    )
+        self._draw_pill()
 
-        # 33 ms ≈ 30 FPS
+        # Roll waveform buffer (smooth even when idle state flips to recording)
+        live = 0.10
+        if st == "recording":
+            live = max(0.10, min(1.0, self._get_level()))
+        # Ease toward target so we don't see visible jitter from raw RMS
+        self._levels.pop(0)
+        prev = self._levels[-1]
+        eased = prev + (live - prev) * 0.35
+        self._levels.append(eased)
+
+        # ── Left: pulsing state dot ───────────────────────────────────────
+        dot_x = 16
+        if st == "recording":
+            color = self.FG_REC
+            pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._phase / 6.0))
+            core = 3.0 + pulse * 1.2
+            # Soft halo (three rings)
+            for i, t in enumerate((0.18, 0.30, 0.55)):
+                rr = core + 3 + i * 2
+                ring = self._mix(self.BG, self.FG_REC_GL, t * pulse)
+                c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
+                              outline=ring, width=1)
+            c.create_oval(dot_x - core, cy - core, dot_x + core, cy + core,
+                          fill=color, outline="")
+        elif st == "transcribing":
+            color = self.FG_TRANS
+            pulse = 0.5 + 0.5 * math.sin(self._phase / 5.0)
+            rr = 3 + pulse * 1.2
+            c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
+                          fill=color, outline="")
+
+        # ── Right: elapsed timer (recording only) ─────────────────────────
+        right_edge = W - 16
+        if st == "recording":
+            elapsed = int(max(0, time.time() - self._rec_start))
+            mm, ss = elapsed // 60, elapsed % 60
+            c.create_text(
+                right_edge, cy, text=f"{mm}:{ss:02d}",
+                fill=self.FG_DIM, font=("Consolas", 10, "bold"),
+                anchor="e",
+            )
+            right_edge -= 42  # reserve space for the timer
+
+        # ── Center: waveform / dots ───────────────────────────────────────
+        wave_x0 = dot_x + 14
+        wave_x1 = right_edge - 8
+        wave_w = max(20, wave_x1 - wave_x0)
+
+        if st == "recording":
+            # Smooth mirrored curve — newest samples on the right, old scrolls left.
+            n = len(self._levels)
+            step = wave_w / (n - 1)
+            max_amp = (H - 14) / 2
+            top_pts: list[float] = []
+            bot_pts: list[float] = []
+            phase = self._phase / 4.0
+            for i, v in enumerate(self._levels):
+                x = wave_x0 + i * step
+                # Small perpendicular wiggle so flat levels still breathe
+                wiggle = 0.85 + 0.15 * math.sin(phase + i * 0.35)
+                a = v * max_amp * wiggle
+                top_pts += [x, cy - a]
+                bot_pts += [x, cy + a]
+            c.create_line(*top_pts, smooth=True, width=2.0,
+                          fill=self.FG_REC,
+                          capstyle="round", joinstyle="round")
+            c.create_line(*bot_pts, smooth=True, width=2.0,
+                          fill=self.FG_REC,
+                          capstyle="round", joinstyle="round")
+
+        elif st == "transcribing":
+            # Three breathing dots, centered
+            gap = 14
+            mid_x = (wave_x0 + wave_x1) // 2
+            for i in range(3):
+                px = mid_x + (i - 1) * gap
+                ph = self._phase / 6.0 + i * 0.75
+                amp = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(ph))
+                sz = 2.0 + amp * 2.2
+                c.create_oval(px - sz, cy - sz, px + sz, cy + sz,
+                              fill=self.FG_TRANS, outline="")
+
         self._canvas.after(33, self._tick)
 
     # ── Fade helpers (run on Tk thread) ───────────────────────────────────────
@@ -1060,12 +1161,15 @@ class Overlay:
         def apply():
             prev = self._state
             self._state = state
+            if state == "recording":
+                self._rec_start = time.time()
+                self._levels = [0.0] * self.LEVELS_N
             if state == "hidden":
                 self._fade(0.0, -0.14)
             else:
                 if prev == "hidden":
                     self._root.deiconify()
-                self._fade(0.94, 0.18)
+                self._fade(0.96, 0.20)
 
         try:
             self._root.after(0, apply)
