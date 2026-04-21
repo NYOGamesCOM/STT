@@ -114,13 +114,17 @@ jobs:
         shell: bash
         run: |
           tag="${{ github.ref_name || inputs.tag }}"
+          # Extract section for this tag + strip leading blank lines in one pass
+          # (portable: avoids BSD-vs-GNU sed -i differences on the macOS runner).
           awk -v ver="$tag" '
-            $0 ~ "^## "ver"( |$)" { capture=1; next }
+            $0 ~ "^## "ver"( |$)" { capture=1; started=0; next }
             capture && /^## v/    { exit }
-            capture               { print }
+            capture {
+              if (!started && NF == 0) next
+              started=1
+              print
+            }
           ' CHANGELOG.md > _notes.md
-          # Strip leading blank lines
-          sed -i '/./,$!d' _notes.md
 
           if [ ! -s _notes.md ]; then
             printf "See the [commit log](https://github.com/%s/commits/%s) for changes in this release.\n" \
