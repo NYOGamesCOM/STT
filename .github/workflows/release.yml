@@ -108,6 +108,44 @@ jobs:
         run: |
           cd dist && zip -r ../${{ matrix.asset }} STT.app
 
+      # ── Extract release notes from CHANGELOG.md ──────────────────────────
+
+      - name: Build release notes from CHANGELOG
+        shell: bash
+        run: |
+          tag="${{ github.ref_name || inputs.tag }}"
+          awk -v ver="$tag" '
+            $0 ~ "^## "ver"( |$)" { capture=1; next }
+            capture && /^## v/    { exit }
+            capture               { print }
+          ' CHANGELOG.md > _notes.md
+          # Strip leading blank lines
+          sed -i '/./,$!d' _notes.md
+
+          if [ ! -s _notes.md ]; then
+            printf "See the [commit log](https://github.com/%s/commits/%s) for changes in this release.\n" \
+              "${{ github.repository }}" "$tag" > _notes.md
+          fi
+
+          {
+            echo "## Downloads"
+            echo
+            echo "| Platform | Asset | Notes |"
+            echo "|---|---|---|"
+            echo "| Windows x64 | \`STT-windows-x64.exe\` | Run **as Administrator** (required for global hotkeys) |"
+            echo "| macOS (arm64) | \`STT-macos.zip\` | Unzip, then grant **Accessibility** in System Settings → Privacy & Security |"
+            echo "| Linux x64 | \`STT-linux-x64\` | Run with **\`sudo\`** (the \`keyboard\` library needs root on Linux) |"
+            echo
+            echo "First launch downloads the Whisper \`base\` model (~150 MB)."
+            echo
+            echo "---"
+            echo
+          } > _header.md
+
+          cat _notes.md _header.md > release_notes.md
+          echo '--- RELEASE NOTES ---'
+          cat release_notes.md
+
       # ── Upload to release ────────────────────────────────────────────────
 
       - name: Attach to GitHub Release
@@ -115,16 +153,5 @@ jobs:
         with:
           files: ${{ matrix.asset }}
           tag_name: ${{ github.ref_name || inputs.tag }}
-          generate_release_notes: true
-          body: |
-            STT (Speech to text) — held-key push-to-talk voice-to-text, fully offline.
-
-            | Platform | Asset | Notes |
-            |---|---|---|
-            | Windows x64 | `STT-windows-x64.exe` | Run **as Administrator** (required for global hotkeys) |
-            | macOS (arm64) | `STT-macos.zip` | Unzip, then grant **Accessibility** in System Settings → Privacy & Security |
-            | Linux x64 | `STT-linux-x64` | Run with **`sudo`** (the `keyboard` library needs root on Linux) |
-
-            First launch downloads the Whisper `base` model (~150 MB) into your HuggingFace cache.
-
-            See the [README](https://github.com/NYOGamesCOM/STT#readme) for configuration and troubleshooting.
+          body_path: release_notes.md
+          generate_release_notes: false

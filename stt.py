@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -86,6 +86,7 @@ DEFAULT_CONFIG: dict = {
     "show_overlay": True,     # Bottom-center on-screen indicator
     "show_main_window": True, # Open the main window on launch
     "start_minimized": False, # Start in tray instead of showing the window
+    "last_seen_version": "", # Used to trigger the "What's new" card once per update
 }
 
 
@@ -967,10 +968,30 @@ def _parse_version(tag: str) -> tuple[int, ...]:
 
 def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
     """GET /releases/latest via stdlib urllib (no extra deps)."""
+    return _fetch_github(
+        "https://api.github.com/repos/NYOGamesCOM/STT/releases/latest",
+        timeout=timeout,
+    )
+
+
+def _fetch_release_for_tag(tag: str, timeout: float = 6.0) -> dict | None:
+    """GET /releases/tags/<tag> — used for the 'What's new' card."""
+    tag = (tag or "").strip()
+    if not tag:
+        return None
+    if not tag.startswith("v"):
+        tag = "v" + tag
+    return _fetch_github(
+        f"https://api.github.com/repos/NYOGamesCOM/STT/releases/tags/{tag}",
+        timeout=timeout,
+    )
+
+
+def _fetch_github(url: str, timeout: float = 6.0) -> dict | None:
     try:
         import urllib.request
         req = urllib.request.Request(
-            _UPDATE_API,
+            url,
             headers={"User-Agent": f"STT/{APP_VERSION}",
                      "Accept": "application/vnd.github+json"},
         )
@@ -979,7 +1000,7 @@ def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
                 return None
             return json.loads(r.read().decode("utf-8"))
     except Exception as exc:
-        log.debug("Update check failed: %s", exc)
+        log.debug("GitHub fetch failed (%s): %s", url, exc)
         return None
 
 
@@ -1010,8 +1031,119 @@ def check_for_update(force: bool = False) -> dict | None:
     return result
 
 
-def show_update_dialog(update: dict) -> None:
-    """Dark-themed 'update available' pop-up. Runs its own tiny Tk root."""
+# ── Helpers for rendering release notes ──────────────────────────────────────
+
+def _relative_time(iso_str: str) -> str:
+    """'2026-04-21T14:00:00Z' → 'just now' | '3h ago' | '2d ago' | '4mo ago'."""
+    if not iso_str:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        diff = (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return ""
+    if diff < 45:                return "just now"
+    if diff < 60 * 60:           return f"{int(diff/60)}m ago"
+    if diff < 60 * 60 * 24:      return f"{int(diff/3600)}h ago"
+    if diff < 60 * 60 * 24 * 30: return f"{int(diff/86400)}d ago"
+    if diff < 60 * 60 * 24 * 365:return f"{int(diff/(86400*30))}mo ago"
+    return f"{int(diff/(86400*365))}y ago"
+
+
+# Palette used by the update dialog (matches the main window).
+_DLG_BG        = "#0b0d11"
+_DLG_BG_CARD   = "#13161c"
+_DLG_BG_ELEV   = "#1a1e26"
+_DLG_BG_HOVER  = "#222832"
+_DLG_BORDER    = "#242a33"
+_DLG_BORDER_S  = "#1c2028"
+_DLG_FG        = "#e9ecf2"
+_DLG_FG_DIM    = "#8289a0"
+_DLG_FG_MUTE   = "#5a6071"
+_DLG_ACCENT    = "#0a84ff"
+_DLG_ACCENT_H  = "#3398ff"
+_DLG_OK        = "#32d74b"
+_DLG_AMBER     = "#ff9f0a"
+_DLG_REC       = "#ff453a"
+
+
+def _render_release_notes(text_widget, md: str) -> None:
+    """Render our CHANGELOG-flavoured markdown into a styled tk.Text.
+
+    Understands:
+      '### ✨ New'     → mint-coloured header
+      '### 🎨 Design'  → amber-coloured header
+      '### 🐛 Fixed'   → red-coloured header
+      '### <other>'    → neutral header
+      '- xxx'          → bullet
+      '## <version>'   → skipped (shown in the dialog header already)
+      '## Downloads'   → stops rendering (we don't show the download table)
+    """
+    text_widget.configure(state="normal")
+    text_widget.delete("1.0", "end")
+
+    text_widget.tag_configure("h_new",    foreground=_DLG_OK,
+                              font=("Segoe UI Semibold", 10), spacing1=10, spacing3=4)
+    text_widget.tag_configure("h_design", foreground=_DLG_AMBER,
+                              font=("Segoe UI Semibold", 10), spacing1=10, spacing3=4)
+    text_widget.tag_configure("h_fix",    foreground=_DLG_REC,
+                              font=("Segoe UI Semibold", 10), spacing1=10, spacing3=4)
+    text_widget.tag_configure("h_other",  foreground=_DLG_FG,
+                              font=("Segoe UI Semibold", 10), spacing1=10, spacing3=4)
+    text_widget.tag_configure("bullet",   foreground=_DLG_FG_MUTE,
+                              font=("Segoe UI", 10))
+    text_widget.tag_configure("body",     foreground=_DLG_FG,
+                              font=("Segoe UI", 10), lmargin1=6, lmargin2=24,
+                              spacing3=2)
+    text_widget.tag_configure("plain",    foreground=_DLG_FG,
+                              font=("Segoe UI", 10), spacing3=2)
+
+    def header_tag(header: str) -> str:
+        low = header.lower()
+        if any(k in low for k in ("new", "added", "✨")):
+            return "h_new"
+        if any(k in low for k in ("design", "changed", "🎨")):
+            return "h_design"
+        if any(k in low for k in ("fix", "bug", "🐛")):
+            return "h_fix"
+        return "h_other"
+
+    first_line = True
+    for line in (md or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            # 'Downloads' marks the boilerplate footer the workflow appends
+            if stripped[3:].strip().lower().startswith("downloads"):
+                break
+            # Skip the '## vX.Y.Z — title' header itself
+            continue
+        if stripped.startswith("### "):
+            header = stripped[4:]
+            text_widget.insert("end", header + "\n", header_tag(header))
+        elif stripped.startswith("- "):
+            text_widget.insert("end", "   •  ", "bullet")
+            text_widget.insert("end", stripped[2:] + "\n", "body")
+        elif stripped == "":
+            if not first_line:
+                text_widget.insert("end", "\n")
+        else:
+            text_widget.insert("end", line + "\n", "plain")
+        first_line = False
+
+    text_widget.configure(state="disabled")
+
+
+def show_update_dialog(update: dict, *, mode: str = "update",
+                       on_dismiss=None) -> None:
+    """Dark-themed update / what's-new pop-up with a custom title bar.
+
+    `update` keys:  tag, name, body, html_url, published_at
+    `mode`:         'update'   — a newer version is available
+                    'whatsnew' — user just launched an already-installed
+                                 newer version; this is the welcome card.
+    `on_dismiss`:   optional callable fired when the dialog closes.
+    """
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -1019,80 +1151,209 @@ def show_update_dialog(update: dict) -> None:
     except ImportError:
         return
 
+    W, H = 500, 460
+    TITLE_H = 38
+
     root = tk.Tk()
-    root.title("Update available — STT")
-    root.geometry("420x260")
-    root.resizable(False, False)
-    root.configure(bg=_UI_BG)
+    root.overrideredirect(True)
+    root.configure(bg=_DLG_BG)
+    root.geometry(f"{W}x{H}")
     root.attributes("-topmost", True)
 
-    root.update_idletasks()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw - 420) // 2}+{(sh - 260) // 2}")
+    root.geometry(f"+{(sw - W) // 2}+{(sh - H) // 2}")
 
+    # Icon so the taskbar / Alt-Tab gets our brand
     try:
         from PIL import ImageTk
-        root._icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))  # type: ignore[attr-defined]
-        root.iconphoto(True, root._icon)  # type: ignore[attr-defined]
+        root._icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))       # type: ignore
+        root.iconphoto(True, root._icon)                                 # type: ignore
     except Exception:
         pass
-
-    style = ttk.Style(root)
     try:
-        style.theme_use("clam")
+        import tempfile, os
+        ico_path = os.path.join(tempfile.gettempdir(), f"stt_{APP_VERSION}.ico")
+        _make_icon(AppState.IDLE).save(
+            ico_path, format="ICO",
+            sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
+        )
+        root.iconbitmap(default=ico_path)
     except Exception:
         pass
-    style.configure(".", background=_UI_BG, foreground=_UI_FG)
-    style.configure("TFrame", background=_UI_BG)
-    style.configure("TLabel", background=_UI_BG, foreground=_UI_FG,
-                    font=("Segoe UI", 10))
-    style.configure("Dim.TLabel", background=_UI_BG, foreground=_UI_FG_DIM,
-                    font=("Segoe UI", 9))
-    style.configure("Title.TLabel", background=_UI_BG, foreground=_UI_FG,
-                    font=("Segoe UI Semibold", 14))
-    style.configure("TButton", background=_UI_BG3, foreground=_UI_FG,
-                    bordercolor=_UI_BORDER, focusthickness=0,
-                    padding=(12, 6), font=("Segoe UI", 10))
-    style.map("TButton", background=[("active", _UI_BORDER)])
-    style.configure("Accent.TButton", background=_UI_ACCENT, foreground="#ffffff")
-    style.map("Accent.TButton", background=[("active", "#2563eb")])
 
-    outer = ttk.Frame(root, style="TFrame")
-    outer.pack(fill="both", expand=True, padx=20, pady=18)
+    # Make an overrideredirect window show up in the taskbar on Windows
+    def _taskbar_fix():
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW  = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
+            ctypes.windll.user32.ShowWindow(hwnd, 5)
+        except Exception:
+            pass
+    root.after(10, _taskbar_fix)
 
-    ttk.Label(outer, text="A new version of STT is available",
-              style="Title.TLabel").pack(anchor="w")
-    ttk.Label(outer,
-              text=f"You're on v{APP_VERSION}.  Latest is {update['tag']}.",
-              style="Dim.TLabel").pack(anchor="w", pady=(4, 12))
+    # ── Custom title bar (drag + close) ────────────────────────────────
+    bar = tk.Frame(root, bg=_DLG_BG, height=TITLE_H)
+    bar.pack(fill="x", side="top")
+    bar.pack_propagate(False)
 
-    # Release notes preview (first ~8 lines)
-    body = (update.get("body") or "").strip()
-    preview = "\n".join(body.splitlines()[:8]) if body else "See release notes on GitHub."
-    notes = tk.Text(outer, height=5, bg=_UI_BG2, fg=_UI_FG,
-                    bd=0, highlightthickness=1, highlightbackground=_UI_BORDER,
-                    wrap="word", padx=10, pady=8,
-                    font=("Segoe UI", 9))
-    notes.pack(fill="both", expand=True)
-    notes.insert("1.0", preview)
-    notes.configure(state="disabled")
+    # Tiny brand icon
+    try:
+        from PIL import ImageTk
+        ti = _make_icon(AppState.IDLE).resize((20, 20))
+        bar._ti = ImageTk.PhotoImage(ti)                 # type: ignore
+        tk.Label(bar, image=bar._ti, bg=_DLG_BG          # type: ignore
+                 ).pack(side="left", padx=(11, 8), pady=9)
+    except Exception:
+        pass
 
-    btn_row = ttk.Frame(outer, style="TFrame")
-    btn_row.pack(fill="x", pady=(14, 0))
+    tk.Label(bar, text=("What's new" if mode == "whatsnew" else "Update available"),
+             bg=_DLG_BG, fg=_DLG_FG,
+             font=("Segoe UI Semibold", 10)).pack(side="left")
 
-    def do_open():
+    def _close():
+        if on_dismiss:
+            try: on_dismiss()
+            except Exception: pass
+        try: root.destroy()
+        except Exception: pass
+
+    close_btn = tk.Label(bar, text="\u2715", bg=_DLG_BG, fg=_DLG_FG_DIM,
+                         cursor="hand2", font=("Segoe UI", 11),
+                         padx=14, pady=0)
+    close_btn.pack(side="right")
+    close_btn.bind("<Enter>", lambda _e: close_btn.configure(bg=_DLG_REC, fg="#fff"))
+    close_btn.bind("<Leave>", lambda _e: close_btn.configure(bg=_DLG_BG, fg=_DLG_FG_DIM))
+    close_btn.bind("<Button-1>", lambda _e: _close())
+
+    drag_off = {"x": 0, "y": 0}
+    def _drag_start(e):
+        drag_off["x"] = e.x_root - root.winfo_x()
+        drag_off["y"] = e.y_root - root.winfo_y()
+    def _drag_motion(e):
+        root.geometry(f"+{e.x_root - drag_off['x']}+{e.y_root - drag_off['y']}")
+    for w in (bar, *bar.winfo_children()):
+        if isinstance(w, (tk.Frame, tk.Label)) and w is not close_btn:
+            w.bind("<Button-1>",  _drag_start)
+            w.bind("<B1-Motion>", _drag_motion)
+
+    # Animated accent strip under the title bar
+    strip = tk.Canvas(root, height=2, bg=_DLG_BG, bd=0, highlightthickness=0)
+    strip.pack(fill="x", side="top")
+    strip_state = {"x": 0}
+    def _animate_strip():
+        try:
+            strip.delete("all")
+            cw = strip.winfo_width() or W
+            strip_state["x"] = (strip_state["x"] + 3) % (cw + 120)
+            # Two overlapping gradients give a smooth drifting sheen
+            for i, (col, off, w_) in enumerate((
+                (_DLG_ACCENT,   strip_state["x"] - 120, 120),
+                (_DLG_ACCENT_H, strip_state["x"] - 260, 140),
+            )):
+                strip.create_rectangle(off, 0, off + w_, 2, fill=col, outline="")
+            strip.after(40, _animate_strip)
+        except Exception:
+            pass
+    _animate_strip()
+
+    # ── Body ────────────────────────────────────────────────────────────
+    body = tk.Frame(root, bg=_DLG_BG)
+    body.pack(fill="both", expand=True, side="top", padx=22, pady=(16, 14))
+
+    if mode == "whatsnew":
+        title = f"Welcome to STT {update['tag']}"
+    else:
+        title = "A new version of STT is available"
+    tk.Label(body, text=title, bg=_DLG_BG, fg=_DLG_FG,
+             font=("Segoe UI Semibold", 15)).pack(anchor="w")
+
+    # Version pill + relative time
+    pill = tk.Frame(body, bg=_DLG_BG)
+    pill.pack(anchor="w", pady=(6, 10))
+    if mode == "whatsnew":
+        tk.Label(pill, text=f" {update['tag']}  ·  latest ",
+                 bg=_DLG_BG_ELEV, fg=_DLG_OK,
+                 font=("Consolas", 9, "bold")).pack(side="left")
+    else:
+        tk.Label(pill, text=f"  v{APP_VERSION}  ",
+                 bg=_DLG_BG_ELEV, fg=_DLG_FG_DIM,
+                 font=("Consolas", 9, "bold")).pack(side="left")
+        tk.Label(pill, text="  \u2192  ", bg=_DLG_BG, fg=_DLG_FG_DIM,
+                 font=("Segoe UI", 10)).pack(side="left")
+        tk.Label(pill, text=f"  {update['tag']}  ",
+                 bg=_DLG_BG_ELEV, fg=_DLG_ACCENT,
+                 font=("Consolas", 9, "bold")).pack(side="left")
+    rel_t = _relative_time(update.get("published_at") or "")
+    if rel_t:
+        tk.Label(pill, text=f"   released {rel_t}", bg=_DLG_BG, fg=_DLG_FG_MUTE,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+    # Notes panel
+    notes_wrap = tk.Frame(body, bg=_DLG_BG_CARD,
+                          highlightthickness=1, highlightbackground=_DLG_BORDER_S)
+    notes_wrap.pack(fill="both", expand=True)
+
+    notes = tk.Text(notes_wrap, bg=_DLG_BG_CARD, fg=_DLG_FG,
+                    bd=0, highlightthickness=0, wrap="word",
+                    padx=14, pady=12, font=("Segoe UI", 10))
+    sb = ttk.Scrollbar(notes_wrap, orient="vertical", command=notes.yview)
+    notes.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    notes.pack(side="left", fill="both", expand=True)
+
+    _render_release_notes(notes, update.get("body") or "")
+
+    # ── Actions ─────────────────────────────────────────────────────────
+    actions = tk.Frame(root, bg=_DLG_BG)
+    actions.pack(fill="x", side="top", padx=22, pady=(0, 18))
+
+    def _gh_link():
         try:
             webbrowser.open(update.get("html_url") or GITHUB_URL + "/releases")
-        finally:
-            root.destroy()
+        except Exception:
+            pass
 
-    ttk.Button(btn_row, text="Remind me later",
-               command=root.destroy).pack(side="right", padx=(6, 0))
-    ttk.Button(btn_row, text="Download update",
-               style="Accent.TButton",
-               command=do_open).pack(side="right")
+    # Tertiary: See on GitHub (left)
+    gh = tk.Label(actions, text="See on GitHub \u2197",
+                  bg=_DLG_BG, fg=_DLG_FG_DIM,
+                  cursor="hand2", font=("Segoe UI", 10))
+    gh.pack(side="left")
+    gh.bind("<Enter>", lambda _e: gh.configure(fg=_DLG_FG))
+    gh.bind("<Leave>", lambda _e: gh.configure(fg=_DLG_FG_DIM))
+    gh.bind("<Button-1>", lambda _e: _gh_link())
 
-    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    def _primary_btn(parent, label: str, cmd, *, accent: bool):
+        bg = _DLG_ACCENT if accent else _DLG_BG_ELEV
+        fg = "#ffffff"  if accent else _DLG_FG
+        hover = _DLG_ACCENT_H if accent else _DLG_BG_HOVER
+        b = tk.Label(parent, text=label, bg=bg, fg=fg,
+                     font=("Segoe UI Semibold", 10),
+                     padx=16, pady=8, cursor="hand2")
+        b.bind("<Enter>", lambda _e: b.configure(bg=hover))
+        b.bind("<Leave>", lambda _e: b.configure(bg=bg))
+        b.bind("<Button-1>", lambda _e: cmd())
+        return b
+
+    if mode == "whatsnew":
+        _primary_btn(actions, "Got it", _close, accent=True).pack(side="right")
+    else:
+        def _download():
+            _gh_link()
+            _close()
+        _primary_btn(actions, "Download update", _download,
+                     accent=True).pack(side="right", padx=(10, 0))
+        _primary_btn(actions, "Remind me later", _close,
+                     accent=False).pack(side="right")
+
+    root.bind("<Escape>", lambda _e: _close())
+    root.protocol("WM_DELETE_WINDOW", _close)
     root.mainloop()
 
 
@@ -1442,6 +1703,7 @@ class MainWindow:
         on_language_change=None,
         on_open_history=None,
         on_quit=None,
+        on_show_whats_new=None,
     ):
         self._get_level = get_level
         self._get_state = get_state
@@ -1453,6 +1715,7 @@ class MainWindow:
         self._cb_lang   = on_language_change
         self._cb_history = on_open_history
         self._cb_quit   = on_quit
+        self._cb_whats_new = on_show_whats_new
 
         self._root = None
         self._widgets: dict = {}
@@ -2028,6 +2291,24 @@ class MainWindow:
         lang_cb.bind("<<ComboboxSelected>>",
                      lambda _e: self._cb_lang and self._cb_lang(lang_var.get()))
 
+        # About — separator + version + link
+        tk.Frame(body, height=1, bg=self.BORDER_SOFT
+                 ).pack(fill="x", pady=(18, 10))
+        section_label("About")
+        about_row = tk.Frame(body, bg=self.BG_CARD)
+        about_row.pack(fill="x")
+        tk.Label(about_row, text=f"STT v{APP_VERSION}",
+                 bg=self.BG_CARD, fg=self.FG,
+                 font=("Segoe UI Semibold", 10)).pack(side="left")
+        wn_link = tk.Label(about_row, text="What's new \u2192",
+                           bg=self.BG_CARD, fg=self.ACCENT, cursor="hand2",
+                           font=("Segoe UI Semibold", 9, "underline"))
+        wn_link.pack(side="right")
+        wn_link.bind("<Enter>", lambda _e: wn_link.configure(fg=self.ACCENT_H))
+        wn_link.bind("<Leave>", lambda _e: wn_link.configure(fg=self.ACCENT))
+        wn_link.bind("<Button-1>",
+                     lambda _e: self._cb_whats_new and self._cb_whats_new())
+
         self._widgets["hk_val"] = hk_val
         self._widgets["mod_var"] = mod_var
         self._widgets["lang_var"] = lang_var
@@ -2401,6 +2682,56 @@ class STTApp:
 
     # ── Update checking ───────────────────────────────────────────────────────
 
+    def _show_whats_new(self, *, force: bool = False) -> None:
+        """Fetch release notes for APP_VERSION and show the 'What's new' card.
+        When `force=False`, we only show once per version (last_seen_version)."""
+        def _worker():
+            try:
+                rel = _fetch_release_for_tag(f"v{APP_VERSION}")
+            except Exception as exc:
+                log.debug("What's-new fetch failed: %s", exc)
+                rel = None
+            if not rel:
+                if force:
+                    self._notify("Couldn't load release notes. Check your connection.")
+                return
+
+            update = {
+                "tag":          rel.get("tag_name") or f"v{APP_VERSION}",
+                "name":         rel.get("name") or f"v{APP_VERSION}",
+                "body":         rel.get("body") or "",
+                "html_url":     rel.get("html_url"),
+                "published_at": rel.get("published_at", ""),
+            }
+
+            def _on_dismiss():
+                # Record that this version's notes have been seen
+                self.config["last_seen_version"] = APP_VERSION
+                save_config(self.config)
+
+            threading.Thread(
+                target=show_update_dialog,
+                args=(update,),
+                kwargs={"mode": "whatsnew", "on_dismiss": _on_dismiss},
+                name="whatsnew-dialog", daemon=True,
+            ).start()
+        threading.Thread(target=_worker, name="whatsnew-fetch",
+                         daemon=True).start()
+
+    def _maybe_show_whats_new_on_launch(self) -> None:
+        """If the user just updated to a new version, surface the notes once."""
+        last_seen = (self.config.get("last_seen_version") or "").strip()
+        if last_seen == APP_VERSION:
+            return
+        # Only surface when updating, not on first-ever install
+        if last_seen:
+            # Give the main window a moment to appear first
+            threading.Timer(3.0, lambda: self._show_whats_new(force=True)).start()
+        else:
+            # First launch ever — just record the version without surfacing notes
+            self.config["last_seen_version"] = APP_VERSION
+            save_config(self.config)
+
     def _check_updates(self, *, manual: bool) -> None:
         """Background check. If newer release exists, show the pop-up.
         When `manual`, always surface a result (pop-up or notification)."""
@@ -2565,6 +2896,9 @@ class STTApp:
         def _manual_update(icon, item):
             self._check_updates(manual=True)
 
+        def _whats_new(icon, item):
+            self._show_whats_new(force=True)
+
         def _open_history(icon, item):
             threading.Thread(target=show_history_window,
                              name="history-window", daemon=True).start()
@@ -2623,6 +2957,7 @@ class STTApp:
             pystray.MenuItem("Set Hotkey…", _set_hotkey),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("History…", _open_history),
+            pystray.MenuItem("What's new in this version…", _whats_new),
             pystray.MenuItem("Check for updates…", _manual_update),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"Version  {APP_VERSION}", action=None, enabled=False),
@@ -2661,6 +2996,7 @@ class STTApp:
                         target=show_history_window, daemon=True
                     ).start(),
                     on_quit=lambda: self.icon and self.icon.stop(),
+                    on_show_whats_new=lambda: self._show_whats_new(force=True),
                 )
                 if self.config.get("start_minimized", False):
                     self.main_window.hide()
@@ -2673,6 +3009,9 @@ class STTApp:
 
         # Non-blocking "new version?" check 8 s after startup
         threading.Timer(8.0, lambda: self._check_updates(manual=False)).start()
+
+        # First launch after an update → surface the "What's new" card once
+        self._maybe_show_whats_new_on_launch()
 
         self.icon = pystray.Icon(
             name="STT",
