@@ -41,11 +41,13 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+APP_VERSION = "0.1.5"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
 HISTORY_PATH = APP_DIR / "history.jsonl"
 MARKSOFT_URL = "https://marksoft.ro"
+GITHUB_URL = "https://github.com/NYOGamesCOM/STT"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -124,61 +126,111 @@ class AppState(Enum):
 # ═════════════════════════════════════════════════════════════════════════════
 
 _ICON_SIZE = 64
-_ICON_BG: dict[AppState, tuple] = {
-    AppState.LOADING_MODEL: (60,  110, 220, 255),   # Blue
-    AppState.IDLE:          (45,  185,  78, 255),   # Green
-    AppState.RECORDING:     (210,  50,  50, 255),   # Red
-    AppState.TRANSCRIBING:  (230, 160,  20, 255),   # Amber
+# Status badge colours — matched to the overlay palette for visual consistency
+_ICON_BADGE: dict[AppState, tuple] = {
+    AppState.LOADING_MODEL: (124, 196, 255, 255),   # Cyan-blue
+    AppState.IDLE:          ( 90, 212, 142, 255),   # Mint
+    AppState.RECORDING:     (255,  77,  96, 255),   # Red
+    AppState.TRANSCRIBING:  (247, 169,  64, 255),   # Amber
 }
 _ICON_TOOLTIPS: dict[AppState, str] = {
-    AppState.LOADING_MODEL: "STT (Speech to text) — Loading model…",
-    AppState.IDLE:          "STT (Speech to text) — Idle  (hold hotkey to record)",
-    AppState.RECORDING:     "STT (Speech to text) — Recording…",
-    AppState.TRANSCRIBING:  "STT (Speech to text) — Transcribing…",
+    AppState.LOADING_MODEL: "STT — Loading model…",
+    AppState.IDLE:          "STT — Ready (hold hotkey to record)",
+    AppState.RECORDING:     "STT — Recording…",
+    AppState.TRANSCRIBING:  "STT — Transcribing…",
 }
 
 _ICON_CACHE: dict[AppState, Image.Image] = {}
 
+# Icon base colour — aligns with overlay BG for a cohesive brand
+_ICON_BG_FILL    = (14, 16, 20, 255)
+_ICON_BG_BORDER  = (255, 255, 255, 28)
+_ICON_BG_HL_TOP  = (255, 255, 255, 18)
+_ICON_S_FILL     = (240, 244, 252, 240)
+
+
+def _load_bold_font(size: int):
+    """Try to load a bold system font; fall back to PIL's default."""
+    from PIL import ImageFont
+    candidates = [
+        "segoeuib.ttf",        # Windows Segoe UI Bold
+        "segoeuisb.ttf",       # Windows Segoe UI Semibold
+        "arialbd.ttf",         # Windows Arial Bold
+        "Arial Bold.ttf",
+        "Helvetica.ttc",       # macOS
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+    ]
+    for name in candidates:
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
 
 def _make_icon(state: AppState) -> Image.Image:
-    """Draw a simple coloured-circle icon with a symbolic mark."""
+    """
+    Draw a branded STT tray icon: a rounded-square dark tile with a large
+    white 'S' always visible and a small state-coloured badge in the
+    top-right corner. Same mark at every state → instant brand recognition.
+    """
     if state in _ICON_CACHE:
         return _ICON_CACHE[state]
 
     sz = _ICON_SIZE
     img = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    bg = _ICON_BG[state]
 
-    # Outer coloured disc
-    d.ellipse([2, 2, sz - 2, sz - 2], fill=bg, outline=(255, 255, 255, 160), width=2)
+    # ── Rounded square base ────────────────────────────────────────────
+    pad = 2
+    radius = 14
+    d.rounded_rectangle(
+        [pad, pad, sz - pad, sz - pad],
+        radius=radius, fill=_ICON_BG_FILL,
+        outline=_ICON_BG_BORDER, width=1,
+    )
+    # Faint top inner highlight — that "glass" feel
+    d.rounded_rectangle(
+        [pad + 1, pad + 1, sz - pad - 1, sz - pad - 1],
+        radius=radius - 1, fill=None,
+        outline=_ICON_BG_HL_TOP, width=1,
+    )
 
-    w = (255, 255, 255, 220)  # white
+    # ── Centered 'S' wordmark ──────────────────────────────────────────
+    font = _load_bold_font(42)
+    text = "S"
+    if font is not None:
+        try:
+            bbox = d.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            tx = (sz - tw) // 2 - bbox[0]
+            ty = (sz - th) // 2 - bbox[1] - 1
+            d.text((tx, ty), text, font=font, fill=_ICON_S_FILL)
+        except Exception:
+            # Fallback: stylised S from two arcs if text rendering fails
+            d.arc([14, 10, 50, 38], start=0, end=180, fill=_ICON_S_FILL, width=6)
+            d.arc([14, 26, 50, 54], start=180, end=360, fill=_ICON_S_FILL, width=6)
+    else:
+        d.arc([14, 10, 50, 38], start=0, end=180, fill=_ICON_S_FILL, width=6)
+        d.arc([14, 26, 50, 54], start=180, end=360, fill=_ICON_S_FILL, width=6)
 
-    if state == AppState.IDLE:
-        # Microphone body
-        d.rounded_rectangle([25, 12, 39, 34], radius=7, fill=w)
-        # Stand arc
-        d.arc([16, 26, 48, 48], start=0, end=180, fill=w, width=3)
-        # Stem + base
-        d.line([32, 48, 32, 54], fill=w, width=3)
-        d.line([24, 54, 40, 54], fill=w, width=3)
-
-    elif state == AppState.RECORDING:
-        # Filled circle = recording indicator
-        d.ellipse([18, 18, 46, 46], fill=w)
-
-    elif state == AppState.TRANSCRIBING:
-        # Three dots = processing
-        for cx in [18, 32, 46]:
-            d.ellipse([cx - 5, 27, cx + 5, 37], fill=w)
-
-    elif state == AppState.LOADING_MODEL:
-        # Hourglass silhouette
-        pts_top = [(18, 16), (46, 16), (32, 32)]
-        pts_bot = [(18, 48), (46, 48), (32, 32)]
-        d.polygon(pts_top, fill=w)
-        d.polygon(pts_bot, fill=w)
+    # ── Status badge dot (top-right) ───────────────────────────────────
+    badge_color = _ICON_BADGE[state]
+    br = 9                          # badge radius
+    bx, by = sz - br - 6, br + 6
+    # Dark ring for contrast against any wallpaper
+    d.ellipse([bx - br - 2, by - br - 2, bx + br + 2, by + br + 2],
+              fill=_ICON_BG_FILL)
+    d.ellipse([bx - br, by - br, bx + br, by + br], fill=badge_color)
+    # Small specular highlight on the badge for depth
+    d.ellipse([bx - br + 2, by - br + 2, bx - 2, by - 2],
+              fill=(255, 255, 255, 60))
 
     _ICON_CACHE[state] = img
     return img
@@ -891,6 +943,160 @@ def show_history_window() -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Update checker  (polls GitHub Releases, shows a pop-up if a newer tag exists)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_UPDATE_API = "https://api.github.com/repos/NYOGamesCOM/STT/releases/latest"
+_UPDATE_CACHE_SECONDS = 3600   # don't hit GitHub more than once an hour
+
+
+def _parse_version(tag: str) -> tuple[int, ...]:
+    """Parse 'v0.1.5' / '0.1.5' → (0, 1, 5). Non-numeric parts become 0."""
+    s = (tag or "").lstrip("v").strip()
+    parts: list[int] = []
+    for p in s.split("."):
+        num = ""
+        for ch in p:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        parts.append(int(num) if num else 0)
+    return tuple(parts) or (0,)
+
+
+def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
+    """GET /releases/latest via stdlib urllib (no extra deps)."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            _UPDATE_API,
+            headers={"User-Agent": f"STT/{APP_VERSION}",
+                     "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if r.status != 200:
+                return None
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as exc:
+        log.debug("Update check failed: %s", exc)
+        return None
+
+
+def check_for_update(force: bool = False) -> dict | None:
+    """
+    Return release dict when a *newer* version is available, else None.
+    Caches the last hit for an hour to avoid hammering the API.
+    """
+    now = time.time()
+    cache = getattr(check_for_update, "_cache", (0.0, None))
+    if not force and now - cache[0] < _UPDATE_CACHE_SECONDS:
+        return cache[1]
+
+    rel = _fetch_latest_release()
+    result: dict | None = None
+    if rel and rel.get("tag_name"):
+        remote = _parse_version(rel["tag_name"])
+        local  = _parse_version(APP_VERSION)
+        if remote > local:
+            result = {
+                "tag":     rel["tag_name"],
+                "name":    rel.get("name") or rel["tag_name"],
+                "body":    rel.get("body") or "",
+                "html_url": rel.get("html_url"),
+                "published_at": rel.get("published_at", ""),
+            }
+    check_for_update._cache = (now, result)  # type: ignore[attr-defined]
+    return result
+
+
+def show_update_dialog(update: dict) -> None:
+    """Dark-themed 'update available' pop-up. Runs its own tiny Tk root."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+        import webbrowser
+    except ImportError:
+        return
+
+    root = tk.Tk()
+    root.title("Update available — STT")
+    root.geometry("420x260")
+    root.resizable(False, False)
+    root.configure(bg=_UI_BG)
+    root.attributes("-topmost", True)
+
+    root.update_idletasks()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - 420) // 2}+{(sh - 260) // 2}")
+
+    try:
+        from PIL import ImageTk
+        root._icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))  # type: ignore[attr-defined]
+        root.iconphoto(True, root._icon)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    style.configure(".", background=_UI_BG, foreground=_UI_FG)
+    style.configure("TFrame", background=_UI_BG)
+    style.configure("TLabel", background=_UI_BG, foreground=_UI_FG,
+                    font=("Segoe UI", 10))
+    style.configure("Dim.TLabel", background=_UI_BG, foreground=_UI_FG_DIM,
+                    font=("Segoe UI", 9))
+    style.configure("Title.TLabel", background=_UI_BG, foreground=_UI_FG,
+                    font=("Segoe UI Semibold", 14))
+    style.configure("TButton", background=_UI_BG3, foreground=_UI_FG,
+                    bordercolor=_UI_BORDER, focusthickness=0,
+                    padding=(12, 6), font=("Segoe UI", 10))
+    style.map("TButton", background=[("active", _UI_BORDER)])
+    style.configure("Accent.TButton", background=_UI_ACCENT, foreground="#ffffff")
+    style.map("Accent.TButton", background=[("active", "#2563eb")])
+
+    outer = ttk.Frame(root, style="TFrame")
+    outer.pack(fill="both", expand=True, padx=20, pady=18)
+
+    ttk.Label(outer, text="A new version of STT is available",
+              style="Title.TLabel").pack(anchor="w")
+    ttk.Label(outer,
+              text=f"You're on v{APP_VERSION}.  Latest is {update['tag']}.",
+              style="Dim.TLabel").pack(anchor="w", pady=(4, 12))
+
+    # Release notes preview (first ~8 lines)
+    body = (update.get("body") or "").strip()
+    preview = "\n".join(body.splitlines()[:8]) if body else "See release notes on GitHub."
+    notes = tk.Text(outer, height=5, bg=_UI_BG2, fg=_UI_FG,
+                    bd=0, highlightthickness=1, highlightbackground=_UI_BORDER,
+                    wrap="word", padx=10, pady=8,
+                    font=("Segoe UI", 9))
+    notes.pack(fill="both", expand=True)
+    notes.insert("1.0", preview)
+    notes.configure(state="disabled")
+
+    btn_row = ttk.Frame(outer, style="TFrame")
+    btn_row.pack(fill="x", pady=(14, 0))
+
+    def do_open():
+        try:
+            webbrowser.open(update.get("html_url") or GITHUB_URL + "/releases")
+        finally:
+            root.destroy()
+
+    ttk.Button(btn_row, text="Remind me later",
+               command=root.destroy).pack(side="right", padx=(6, 0))
+    ttk.Button(btn_row, text="Download update",
+               style="Accent.TButton",
+               command=do_open).pack(side="right")
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.mainloop()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # On-screen overlay indicator  (WisperFlow-style pill, bottom-centre)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1260,6 +1466,14 @@ class MainWindow:
         root.geometry(f"{self.W}x{self.H}")
         root.minsize(420, 540)
 
+        # Use the branded STT tile as the title-bar / taskbar icon
+        try:
+            from PIL import ImageTk
+            self._wm_icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))
+            root.iconphoto(True, self._wm_icon)
+        except Exception as exc:
+            log.debug("Could not set window icon: %s", exc)
+
         # Centre
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -1423,16 +1637,34 @@ class MainWindow:
                    command=self.hide).pack(side="right")
 
         # ── Footer ───────────────────────────────────────────────────────
-        footer = ttk.Frame(outer, style="TFrame")
-        footer.pack(fill="x", pady=(12, 0))
-        ttk.Label(footer, text="Powered by ", style="Dim.TLabel").pack(side="left")
-        link = tk.Label(footer, text="MarkSoft", bg=_UI_BG, fg=_UI_ACCENT,
-                        cursor="hand2", font=("Segoe UI", 9, "underline"))
-        link.pack(side="left")
         import webbrowser
-        link.bind("<Button-1>", lambda _e: webbrowser.open(MARKSOFT_URL))
-        ttk.Label(footer, text=f"  ·  {MARKSOFT_URL}",
-                  style="Dim.TLabel").pack(side="left")
+        tk.Frame(outer, height=1, bg=_UI_BORDER).pack(fill="x", pady=(14, 10))
+
+        footer = ttk.Frame(outer, style="TFrame")
+        footer.pack(fill="x")
+
+        # Left: version · GitHub link
+        left = ttk.Frame(footer, style="TFrame")
+        left.pack(side="left")
+        ttk.Label(left, text=f"STT v{APP_VERSION}",
+                  style="Dim.TLabel",
+                  font=("Segoe UI Semibold", 9)).pack(side="left")
+        ttk.Label(left, text="  ·  ", style="Dim.TLabel").pack(side="left")
+        gh_link = tk.Label(left, text="GitHub",
+                           bg=_UI_BG, fg=_UI_ACCENT, cursor="hand2",
+                           font=("Segoe UI", 9, "underline"))
+        gh_link.pack(side="left")
+        gh_link.bind("<Button-1>", lambda _e: webbrowser.open(GITHUB_URL))
+
+        # Right: "by MarkSoft" clickable wordmark
+        right = ttk.Frame(footer, style="TFrame")
+        right.pack(side="right")
+        ttk.Label(right, text="by ", style="Dim.TLabel").pack(side="left")
+        ms_link = tk.Label(right, text="MarkSoft",
+                           bg=_UI_BG, fg=_UI_ACCENT, cursor="hand2",
+                           font=("Segoe UI Semibold", 9, "underline"))
+        ms_link.pack(side="left")
+        ms_link.bind("<Button-1>", lambda _e: webbrowser.open(MARKSOFT_URL))
 
         # ── State stash + bindings ───────────────────────────────────────
         self._root = root
@@ -1731,6 +1963,30 @@ class STTApp:
 
     # ── UI-initiated config changes ───────────────────────────────────────────
 
+    # ── Update checking ───────────────────────────────────────────────────────
+
+    def _check_updates(self, *, manual: bool) -> None:
+        """Background check. If newer release exists, show the pop-up.
+        When `manual`, always surface a result (pop-up or notification)."""
+        def _worker():
+            try:
+                upd = check_for_update(force=manual)
+            except Exception as exc:
+                log.debug("Update check error: %s", exc)
+                upd = None
+            if upd:
+                try:
+                    threading.Thread(
+                        target=show_update_dialog, args=(upd,),
+                        name="update-dialog", daemon=True,
+                    ).start()
+                except Exception:
+                    pass
+            elif manual:
+                self._notify(f"You're up to date.  (v{APP_VERSION})")
+        threading.Thread(target=_worker, name="update-check",
+                         daemon=True).start()
+
     def _ui_change_hotkey(self) -> None:
         def on_set(new_key: str):
             self.config["hotkey"] = new_key
@@ -1870,6 +2126,9 @@ class STTApp:
             if self.main_window is not None:
                 self.main_window.show()
 
+        def _manual_update(icon, item):
+            self._check_updates(manual=True)
+
         def _open_history(icon, item):
             threading.Thread(target=show_history_window,
                              name="history-window", daemon=True).start()
@@ -1928,6 +2187,9 @@ class STTApp:
             pystray.MenuItem("Set Hotkey…", _set_hotkey),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("History…", _open_history),
+            pystray.MenuItem("Check for updates…", _manual_update),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(f"Version  {APP_VERSION}", action=None, enabled=False),
             pystray.MenuItem("Quit", _quit),
         )
 
@@ -1972,6 +2234,9 @@ class STTApp:
 
         self._register_hotkey()
         self._load_model()
+
+        # Non-blocking "new version?" check 8 s after startup
+        threading.Timer(8.0, lambda: self._check_updates(manual=False)).start()
 
         self.icon = pystray.Icon(
             name="STT",
