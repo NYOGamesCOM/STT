@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.3.0"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -87,9 +87,6 @@ DEFAULT_CONFIG: dict = {
     "show_main_window": True, # Open the main window on launch
     "start_minimized": False, # Start in tray instead of showing the window
     "last_seen_version": "", # Used to trigger the "What's new" card once per update
-    "use_native_titlebar": False, # Fall back to the native Windows title bar
-                                  # (white on Win 10, dark on Win 11 via DWM)
-                                  # if the custom bar misbehaves on your machine.
 }
 
 
@@ -544,7 +541,114 @@ def _inject_via_type(text: str) -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Hotkey dialog (tkinter, runs in a daemon thread)
+# UIManager — single Tk interpreter + dispatch queue
+# ═════════════════════════════════════════════════════════════════════════════
+
+class UIManager:
+    """
+    Owns THE single ``tk.Tk()`` for the whole app and runs its mainloop on
+    a dedicated UI thread. Every other window (overlay, main window, any
+    dialog) is created as a ``Toplevel`` of this hidden root.
+
+    Work from other threads (pystray, transcription worker, timers, …)
+    must be routed through :py:meth:`enqueue` so it runs on the UI thread.
+
+    This exists because multi-threaded Tkinter with several live
+    ``Tk()`` interpreters is the cause of roughly every weird GUI bug
+    we've hit — missing redraws, silently dropped ``after`` callbacks,
+    hard crashes on dialog open, windows that won't restore. All of
+    those vanish when Tk has exactly one interpreter on one thread.
+    """
+
+    def __init__(self) -> None:
+        self.root = None                    # tk.Tk instance (hidden)
+        self._queue: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    def start(self) -> None:
+        """Spin up the UI thread and block until the root is ready."""
+        self._thread = threading.Thread(
+            target=self._run, name="ui", daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait(timeout=5.0)
+        if self.root is None:
+            raise RuntimeError("UIManager failed to initialise tkinter")
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            log.error("tkinter unavailable — UIManager disabled.")
+            self._ready.set()
+            return
+
+        self.root = tk.Tk()
+        # Hidden interpreter root — never shown. Everything real is a Toplevel.
+        self.root.withdraw()
+        self.root.title("STT")
+
+        # Shared base style — ttk 'clam' is the most themeable on Windows.
+        try:
+            style = ttk.Style(self.root)
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        self._running = True
+        self._ready.set()
+        self._poll_queue()
+
+        try:
+            self.root.mainloop()
+        except Exception as exc:
+            log.debug("UI mainloop ended: %s", exc)
+        finally:
+            self._running = False
+
+    def _poll_queue(self) -> None:
+        # Drain everything that's queued, then reschedule.
+        try:
+            while True:
+                fn = self._queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    log.exception("UI task raised")
+        except queue.Empty:
+            pass
+        if self.root is not None and self._running:
+            try:
+                self.root.after(25, self._poll_queue)
+            except Exception:
+                pass
+
+    # ── Thread-safe API ───────────────────────────────────────────────────────
+
+    def enqueue(self, fn) -> None:
+        """Schedule ``fn`` to run on the UI thread. Safe to call from anywhere."""
+        self._queue.put(fn)
+
+    def shutdown(self) -> None:
+        if self.root is None:
+            return
+        def _quit():
+            try:
+                self.root.quit()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+        self.enqueue(_quit)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Hotkey dialog  (Toplevel — scheduled on the UI thread via UIManager)
 # ═════════════════════════════════════════════════════════════════════════════
 
 # Map Tk keysym names → keyboard-library names
@@ -566,36 +670,37 @@ _TK_KEY_MAP: dict[str, str] = {
 }
 
 
-def show_hotkey_dialog(current: str, on_set) -> None:
-    """Display a small window that listens for a keypress and reports it."""
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-    except ImportError:
-        log.error("tkinter is not available — cannot show hotkey dialog.")
-        return
+def show_hotkey_dialog(ui: UIManager, current: str, on_set) -> None:
+    """Show a small dialog that listens for a keypress. Thread-safe —
+    work is marshalled onto the UI thread via :py:meth:`UIManager.enqueue`."""
+    ui.enqueue(lambda: _build_hotkey_dialog(ui, current, on_set))
 
-    root = tk.Tk()
-    root.title("Set Hotkey — STT (Speech to text)")
-    root.geometry("340x170")
-    root.resizable(False, False)
-    root.attributes("-topmost", True)
 
-    # Centre on screen
-    root.update_idletasks()
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw - 340) // 2}+{(sh - 170) // 2}")
+def _build_hotkey_dialog(ui: UIManager, current: str, on_set) -> None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    top = tk.Toplevel(ui.root)
+    top.title("Set Hotkey — STT")
+    top.geometry("340x170")
+    top.resizable(False, False)
+    top.attributes("-topmost", True)
+    top.transient(ui.root)
+
+    top.update_idletasks()
+    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+    top.geometry(f"+{(sw - 340) // 2}+{(sh - 170) // 2}")
 
     captured = [current]
 
     tk.Label(
-        root,
+        top,
         text="Press the key you want to use as the\nhold-to-record hotkey, then click Set.",
         pady=12, font=("Segoe UI", 10),
     ).pack()
 
     var = tk.StringVar(value=current)
-    entry = ttk.Entry(root, textvariable=var, state="readonly",
+    entry = ttk.Entry(top, textvariable=var, state="readonly",
                       justify="center", font=("Segoe UI", 13, "bold"))
     entry.pack(pady=4, padx=24, fill="x")
 
@@ -605,21 +710,22 @@ def show_hotkey_dialog(current: str, on_set) -> None:
         captured[0] = name
         var.set(name)
 
-    root.bind("<KeyPress>", on_key)
-    root.focus_force()
+    top.bind("<KeyPress>", on_key)
+    top.focus_force()
 
-    btn_row = tk.Frame(root)
+    btn_row = tk.Frame(top)
     btn_row.pack(pady=10)
 
     def do_set():
-        on_set(captured[0])
-        root.destroy()
+        try:
+            on_set(captured[0])
+        finally:
+            top.destroy()
 
-    ttk.Button(btn_row, text="Set",    command=do_set,        width=10).pack(side="left", padx=6)
-    ttk.Button(btn_row, text="Cancel", command=root.destroy,  width=10).pack(side="left", padx=6)
+    ttk.Button(btn_row, text="Set",    command=do_set,      width=10).pack(side="left", padx=6)
+    ttk.Button(btn_row, text="Cancel", command=top.destroy, width=10).pack(side="left", padx=6)
 
-    root.protocol("WM_DELETE_WINDOW", root.destroy)
-    root.mainloop()
+    top.protocol("WM_DELETE_WINDOW", top.destroy)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -723,36 +829,31 @@ _UI_DANGER  = "#ef4444"
 _UI_BORDER  = "#2f343d"
 
 
-def show_history_window() -> None:
-    """Open the dark-themed transcription history browser."""
-    try:
-        import tkinter as tk
-        from tkinter import ttk, messagebox
-        import webbrowser
-    except ImportError:
-        log.error("tkinter unavailable — history window disabled.")
-        return
+def show_history_window(ui: UIManager) -> None:
+    """Open the dark-themed transcription history browser (thread-safe)."""
+    ui.enqueue(lambda: _build_history_window(ui))
 
-    root = tk.Tk()
-    root.title("History — STT (Speech to text)")
-    root.geometry("720x520")
-    root.minsize(560, 420)
-    root.configure(bg=_UI_BG)
 
-    # Centre on screen
-    root.update_idletasks()
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+def _build_history_window(ui: UIManager) -> None:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    import webbrowser
+
+    top = tk.Toplevel(ui.root)
+    top.title("History — STT")
+    top.geometry("720x520")
+    top.minsize(560, 420)
+    top.configure(bg=_UI_BG)
+    top.transient(ui.root)
+
+    top.update_idletasks()
+    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
     x = (sw - 720) // 2
     y = (sh - 520) // 2
-    root.geometry(f"+{x}+{y}")
+    top.geometry(f"+{x}+{y}")
 
-    # ── ttk dark styling ──────────────────────────────────────────────────
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
-
+    # ── ttk dark styling (shared style; applies to all Toplevels) ─────────
+    style = ttk.Style(ui.root)
     style.configure(".", background=_UI_BG, foreground=_UI_FG,
                     fieldbackground=_UI_BG2, bordercolor=_UI_BORDER,
                     lightcolor=_UI_BG, darkcolor=_UI_BG)
@@ -779,7 +880,7 @@ def show_history_window() -> None:
               background=[("active", "#3a1f22"), ("pressed", "#3a1f22")])
 
     # ── Layout: header / search / list / preview / footer ─────────────────
-    outer = ttk.Frame(root, style="TFrame")
+    outer = ttk.Frame(top, style="TFrame")
     outer.pack(fill="both", expand=True, padx=16, pady=14)
 
     header = ttk.Frame(outer, style="TFrame")
@@ -906,7 +1007,7 @@ def show_history_window() -> None:
         if not messagebox.askyesno(
             "Clear history",
             "Remove all transcription history? This cannot be undone.",
-            parent=root,
+            parent=top,
         ):
             return
         clear_history()
@@ -938,12 +1039,11 @@ def show_history_window() -> None:
     listbox.bind("<<ListboxSelect>>", on_select)
     listbox.bind("<Double-Button-1>", do_copy)
     listbox.bind("<Return>", do_copy)
-    root.bind("<Escape>", lambda _e: root.destroy())
+    top.bind("<Escape>", lambda _e: top.destroy())
 
     refresh_list()
     search_entry.focus_set()
-    root.protocol("WM_DELETE_WINDOW", root.destroy)
-    root.mainloop()
+    top.protocol("WM_DELETE_WINDOW", top.destroy)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1137,137 +1237,73 @@ def _render_release_notes(text_widget, md: str) -> None:
     text_widget.configure(state="disabled")
 
 
-def show_update_dialog(update: dict, *, mode: str = "update",
-                       on_dismiss=None) -> None:
-    """Dark-themed update / what's-new pop-up with a custom title bar.
+def show_update_dialog(ui: UIManager, update: dict, *,
+                       mode: str = "update", on_dismiss=None) -> None:
+    """Thread-safe: schedule the update / what's-new dialog on the UI thread."""
+    ui.enqueue(lambda: _build_update_dialog(ui, update, mode=mode,
+                                            on_dismiss=on_dismiss))
 
-    `update` keys:  tag, name, body, html_url, published_at
-    `mode`:         'update'   — a newer version is available
-                    'whatsnew' — user just launched an already-installed
-                                 newer version; this is the welcome card.
-    `on_dismiss`:   optional callable fired when the dialog closes.
-    """
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-        import webbrowser
-    except ImportError:
-        return
+
+def _build_update_dialog(ui: UIManager, update: dict, *,
+                         mode: str = "update", on_dismiss=None) -> None:
+    import tkinter as tk
+    from tkinter import ttk
+    import webbrowser
 
     W, H = 500, 460
-    TITLE_H = 38
 
-    root = tk.Tk()
-    root.overrideredirect(True)
-    root.configure(bg=_DLG_BG)
-    root.geometry(f"{W}x{H}")
-    root.attributes("-topmost", True)
+    # Native-titled Toplevel — simpler, always reliable, still dark bodied.
+    top = tk.Toplevel(ui.root)
+    top.title("What's new — STT" if mode == "whatsnew" else "Update available — STT")
+    top.configure(bg=_DLG_BG)
+    top.geometry(f"{W}x{H}")
+    top.resizable(False, False)
+    top.transient(ui.root)
+    top.attributes("-topmost", True)
+    top.after(200, lambda: top.attributes("-topmost", False))
 
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw - W) // 2}+{(sh - H) // 2}")
+    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+    top.geometry(f"+{(sw - W) // 2}+{(sh - H) // 2}")
 
-    # Icon so the taskbar / Alt-Tab gets our brand
+    # Try to darken the native title bar on Windows 11
     try:
-        from PIL import ImageTk
-        root._icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))       # type: ignore
-        root.iconphoto(True, root._icon)                                 # type: ignore
-    except Exception:
-        pass
-    try:
-        import tempfile, os
-        ico_path = os.path.join(tempfile.gettempdir(), f"stt_{APP_VERSION}.ico")
-        _make_icon(AppState.IDLE).save(
-            ico_path, format="ICO",
-            sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
+        import ctypes
+        from ctypes import wintypes
+        top.update_idletasks()
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        hwnd = top.winfo_id()
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            ctypes.c_uint(DWMWA_USE_IMMERSIVE_DARK_MODE),
+            ctypes.byref(value), ctypes.sizeof(value),
         )
-        root.iconbitmap(default=ico_path)
     except Exception:
         pass
 
-    # Make an overrideredirect window show up in the taskbar on Windows
-    def _taskbar_fix():
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-            GWL_EXSTYLE = -20
-            WS_EX_APPWINDOW  = 0x00040000
-            WS_EX_TOOLWINDOW = 0x00000080
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            ctypes.windll.user32.ShowWindow(hwnd, 0)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
-            ctypes.windll.user32.ShowWindow(hwnd, 5)
-        except Exception:
-            pass
-    root.after(10, _taskbar_fix)
-
-    # ── Custom title bar (drag + close) ────────────────────────────────
-    bar = tk.Frame(root, bg=_DLG_BG, height=TITLE_H)
-    bar.pack(fill="x", side="top")
-    bar.pack_propagate(False)
-
-    # Tiny brand icon
-    try:
-        from PIL import ImageTk
-        ti = _make_icon(AppState.IDLE).resize((20, 20))
-        bar._ti = ImageTk.PhotoImage(ti)                 # type: ignore
-        tk.Label(bar, image=bar._ti, bg=_DLG_BG          # type: ignore
-                 ).pack(side="left", padx=(11, 8), pady=9)
-    except Exception:
-        pass
-
-    tk.Label(bar, text=("What's new" if mode == "whatsnew" else "Update available"),
-             bg=_DLG_BG, fg=_DLG_FG,
-             font=("Segoe UI Semibold", 10)).pack(side="left")
-
-    def _close():
-        if on_dismiss:
-            try: on_dismiss()
-            except Exception: pass
-        try: root.destroy()
-        except Exception: pass
-
-    close_btn = tk.Label(bar, text="\u2715", bg=_DLG_BG, fg=_DLG_FG_DIM,
-                         cursor="hand2", font=("Segoe UI", 11),
-                         padx=14, pady=0)
-    close_btn.pack(side="right")
-    close_btn.bind("<Enter>", lambda _e: close_btn.configure(bg=_DLG_REC, fg="#fff"))
-    close_btn.bind("<Leave>", lambda _e: close_btn.configure(bg=_DLG_BG, fg=_DLG_FG_DIM))
-    close_btn.bind("<Button-1>", lambda _e: _close())
-
-    drag_off = {"x": 0, "y": 0}
-    def _drag_start(e):
-        drag_off["x"] = e.x_root - root.winfo_x()
-        drag_off["y"] = e.y_root - root.winfo_y()
-    def _drag_motion(e):
-        root.geometry(f"+{e.x_root - drag_off['x']}+{e.y_root - drag_off['y']}")
-    for w in (bar, *bar.winfo_children()):
-        if isinstance(w, (tk.Frame, tk.Label)) and w is not close_btn:
-            w.bind("<Button-1>",  _drag_start)
-            w.bind("<B1-Motion>", _drag_motion)
-
-    # Animated accent strip under the title bar
-    strip = tk.Canvas(root, height=2, bg=_DLG_BG, bd=0, highlightthickness=0)
+    # Animated accent strip at the very top of the body
+    strip = tk.Canvas(top, height=2, bg=_DLG_BG, bd=0, highlightthickness=0)
     strip.pack(fill="x", side="top")
-    strip_state = {"x": 0}
+    strip_state = {"x": 0, "alive": True}
     def _animate_strip():
+        if not strip_state["alive"]:
+            return
         try:
             strip.delete("all")
             cw = strip.winfo_width() or W
             strip_state["x"] = (strip_state["x"] + 3) % (cw + 120)
-            # Two overlapping gradients give a smooth drifting sheen
-            for i, (col, off, w_) in enumerate((
+            for col, off, w_ in (
                 (_DLG_ACCENT,   strip_state["x"] - 120, 120),
                 (_DLG_ACCENT_H, strip_state["x"] - 260, 140),
-            )):
+            ):
                 strip.create_rectangle(off, 0, off + w_, 2, fill=col, outline="")
             strip.after(40, _animate_strip)
         except Exception:
-            pass
+            strip_state["alive"] = False
     _animate_strip()
 
     # ── Body ────────────────────────────────────────────────────────────
-    body = tk.Frame(root, bg=_DLG_BG)
+    body = tk.Frame(top, bg=_DLG_BG)
     body.pack(fill="both", expand=True, side="top", padx=22, pady=(16, 14))
 
     if mode == "whatsnew":
@@ -1277,7 +1313,6 @@ def show_update_dialog(update: dict, *, mode: str = "update",
     tk.Label(body, text=title, bg=_DLG_BG, fg=_DLG_FG,
              font=("Segoe UI Semibold", 15)).pack(anchor="w")
 
-    # Version pill + relative time
     pill = tk.Frame(body, bg=_DLG_BG)
     pill.pack(anchor="w", pady=(6, 10))
     if mode == "whatsnew":
@@ -1295,10 +1330,10 @@ def show_update_dialog(update: dict, *, mode: str = "update",
                  font=("Consolas", 9, "bold")).pack(side="left")
     rel_t = _relative_time(update.get("published_at") or "")
     if rel_t:
-        tk.Label(pill, text=f"   released {rel_t}", bg=_DLG_BG, fg=_DLG_FG_MUTE,
+        tk.Label(pill, text=f"   released {rel_t}",
+                 bg=_DLG_BG, fg=_DLG_FG_MUTE,
                  font=("Segoe UI", 9)).pack(side="left")
 
-    # Notes panel
     notes_wrap = tk.Frame(body, bg=_DLG_BG_CARD,
                           highlightthickness=1, highlightbackground=_DLG_BORDER_S)
     notes_wrap.pack(fill="both", expand=True)
@@ -1314,8 +1349,16 @@ def show_update_dialog(update: dict, *, mode: str = "update",
     _render_release_notes(notes, update.get("body") or "")
 
     # ── Actions ─────────────────────────────────────────────────────────
-    actions = tk.Frame(root, bg=_DLG_BG)
+    actions = tk.Frame(top, bg=_DLG_BG)
     actions.pack(fill="x", side="top", padx=22, pady=(0, 18))
+
+    def _close():
+        strip_state["alive"] = False
+        if on_dismiss:
+            try: on_dismiss()
+            except Exception: pass
+        try: top.destroy()
+        except Exception: pass
 
     def _gh_link():
         try:
@@ -1323,7 +1366,6 @@ def show_update_dialog(update: dict, *, mode: str = "update",
         except Exception:
             pass
 
-    # Tertiary: See on GitHub (left)
     gh = tk.Label(actions, text="See on GitHub \u2197",
                   bg=_DLG_BG, fg=_DLG_FG_DIM,
                   cursor="hand2", font=("Segoe UI", 10))
@@ -1355,9 +1397,8 @@ def show_update_dialog(update: dict, *, mode: str = "update",
         _primary_btn(actions, "Remind me later", _close,
                      accent=False).pack(side="right")
 
-    root.bind("<Escape>", lambda _e: _close())
-    root.protocol("WM_DELETE_WINDOW", _close)
-    root.mainloop()
+    top.bind("<Escape>", lambda _e: _close())
+    top.protocol("WM_DELETE_WINDOW", _close)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1392,63 +1433,63 @@ class Overlay:
     # Windows transparency key — any pixel this exact color becomes see-through
     KEY       = "#ff00ff"
 
-    def __init__(self, get_level):
+    def __init__(self, ui: UIManager, get_level):
+        self._ui = ui
         self._get_level = get_level
         self._state = "hidden"           # "hidden" | "recording" | "transcribing"
-        self._root = None
+        self._top = None                 # tk.Toplevel created on UI thread
         self._canvas = None
         self._phase = 0
         self._rec_start = 0.0
         self._levels: list[float] = [0.0] * self.LEVELS_N
         self._transparent_ok = False
-        self._ready = threading.Event()
-        threading.Thread(target=self._run, name="overlay", daemon=True).start()
-        self._ready.wait(timeout=3.0)
+        self._pending_state: str | None = None  # if set_state arrives before _build
 
-    # ── Tk thread ─────────────────────────────────────────────────────────────
+        ui.enqueue(self._build)
 
-    def _run(self) -> None:
-        try:
-            import tkinter as tk
-        except ImportError:
-            log.error("tkinter unavailable — overlay disabled.")
-            self._ready.set()
-            return
+    # ── UI-thread construction ────────────────────────────────────────────────
 
-        root = tk.Tk()
-        root.withdraw()
-        root.overrideredirect(True)
-        root.attributes("-topmost", True)
-        root.attributes("-alpha", 0.0)
+    def _build(self) -> None:
+        """Runs on the UI thread. Creates the Toplevel."""
+        import tkinter as tk
+
+        top = tk.Toplevel(self._ui.root)
+        top.withdraw()
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.attributes("-alpha", 0.0)
 
         # Try true transparent corners (Windows). Fallback: opaque pill.
         try:
-            root.configure(bg=self.KEY)
-            root.attributes("-transparentcolor", self.KEY)
+            top.configure(bg=self.KEY)
+            top.attributes("-transparentcolor", self.KEY)
             self._transparent_ok = True
         except Exception:
-            root.configure(bg=self.BG)
+            top.configure(bg=self.BG)
             self._transparent_ok = False
 
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
         x = (sw - self.W) // 2
         y = sh - self.H - self.MARGIN_BOTTOM
-        root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        top.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
         canvas_bg = self.KEY if self._transparent_ok else self.BG
         canvas = tk.Canvas(
-            root, width=self.W, height=self.H, bg=canvas_bg,
+            top, width=self.W, height=self.H, bg=canvas_bg,
             highlightthickness=0, bd=0,
         )
         canvas.pack(fill="both", expand=True)
 
-        self._root = root
+        self._top = top
         self._canvas = canvas
 
         # Click-through + hide from Alt-Tab (Windows)
         try:
             import ctypes
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            hwnd = top.winfo_id()
+            parent = ctypes.windll.user32.GetParent(hwnd)
+            if parent:
+                hwnd = parent
             GWL_EXSTYLE = -20
             WS_EX_LAYERED     = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
@@ -1463,12 +1504,12 @@ class Overlay:
         except Exception as exc:
             log.debug("Click-through setup failed: %s", exc)
 
-        self._ready.set()
         self._tick()
-        try:
-            root.mainloop()
-        except Exception as exc:
-            log.debug("Overlay mainloop ended: %s", exc)
+
+        # If set_state() fired before _build finished, honour it now
+        if self._pending_state is not None:
+            pending, self._pending_state = self._pending_state, None
+            self._apply_state(pending)
 
     # ── Color helper (blend hex → bg for faux-alpha glows) ────────────────────
 
@@ -1500,7 +1541,7 @@ class Overlay:
 
     def _tick(self) -> None:
         import math
-        if self._canvas is None or self._root is None:
+        if self._canvas is None or self._top is None:
             return
 
         self._phase += 1
@@ -1603,54 +1644,53 @@ class Overlay:
     # ── Fade helpers (run on Tk thread) ───────────────────────────────────────
 
     def _fade(self, target: float, step: float) -> None:
-        if self._root is None:
+        if self._top is None:
             return
         try:
-            cur = float(self._root.attributes("-alpha"))
+            cur = float(self._top.attributes("-alpha"))
         except Exception:
             return
         done = (step > 0 and cur + step >= target) or \
                (step < 0 and cur + step <= target)
         if done:
-            self._root.attributes("-alpha", target)
+            self._top.attributes("-alpha", target)
             if target == 0.0:
-                self._root.withdraw()
+                self._top.withdraw()
             return
-        self._root.attributes("-alpha", cur + step)
-        self._root.after(16, lambda: self._fade(target, step))
+        self._top.attributes("-alpha", cur + step)
+        self._top.after(16, lambda: self._fade(target, step))
 
     # ── Public (thread-safe) ──────────────────────────────────────────────────
 
-    def set_state(self, state: str) -> None:
-        """state: 'hidden' | 'recording' | 'transcribing'"""
-        if self._root is None:
+    def _apply_state(self, state: str) -> None:
+        """UI-thread implementation of set_state."""
+        if self._top is None:
+            self._pending_state = state
             return
+        prev = self._state
+        self._state = state
+        if state == "recording":
+            self._rec_start = time.time()
+            self._levels = [0.0] * self.LEVELS_N
+        if state == "hidden":
+            self._fade(0.0, -0.14)
+        else:
+            if prev == "hidden":
+                self._top.deiconify()
+            self._fade(0.96, 0.20)
 
-        def apply():
-            prev = self._state
-            self._state = state
-            if state == "recording":
-                self._rec_start = time.time()
-                self._levels = [0.0] * self.LEVELS_N
-            if state == "hidden":
-                self._fade(0.0, -0.14)
-            else:
-                if prev == "hidden":
-                    self._root.deiconify()
-                self._fade(0.96, 0.20)
-
-        try:
-            self._root.after(0, apply)
-        except Exception:
-            pass
+    def set_state(self, state: str) -> None:
+        """Thread-safe. state: 'hidden' | 'recording' | 'transcribing'."""
+        self._ui.enqueue(lambda: self._apply_state(state))
 
     def shutdown(self) -> None:
-        if self._root is None:
-            return
-        try:
-            self._root.after(0, self._root.destroy)
-        except Exception:
-            pass
+        def _destroy():
+            if self._top is not None:
+                try:
+                    self._top.destroy()
+                except Exception:
+                    pass
+        self._ui.enqueue(_destroy)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1696,6 +1736,7 @@ class MainWindow:
     def __init__(
         self,
         *,
+        ui: UIManager,
         get_level,
         get_state,
         get_config,
@@ -1708,6 +1749,7 @@ class MainWindow:
         on_quit=None,
         on_show_whats_new=None,
     ):
+        self._ui = ui
         self._get_level = get_level
         self._get_state = get_state
         self._get_config = get_config
@@ -1720,7 +1762,7 @@ class MainWindow:
         self._cb_quit   = on_quit
         self._cb_whats_new = on_show_whats_new
 
-        self._root = None
+        self._top = None                 # tk.Toplevel created on UI thread
         self._widgets: dict = {}
         self._wave_phase = 0
         self._levels: list[float] = [0.0] * 80
@@ -1729,79 +1771,59 @@ class MainWindow:
         self._last_model = None
         self._last_language = None
         self._drawer_open = False
-        self._is_maximized = False
-        self._pre_max_geom = ""
-        self._ready = threading.Event()
 
-        threading.Thread(target=self._run, name="main-window", daemon=True).start()
-        self._ready.wait(timeout=4.0)
+        ui.enqueue(self._build)
 
-    # ── Tk thread ─────────────────────────────────────────────────────────────
+    # ── UI-thread construction ────────────────────────────────────────────────
 
-    def _run(self) -> None:
+    def _build(self) -> None:
+        """Runs on the UI thread. Creates the Toplevel window."""
+        import tkinter as tk
+        from tkinter import ttk
+
+        top = tk.Toplevel(self._ui.root)
+        top.title("STT — Speech to text")       # native title bar
+        top.configure(bg=self.BG)
+        top.geometry(f"{self.W}x{self.H}")
+        top.minsize(420, 480)
+
+        # Try to darken the native title bar on Windows 11 via DWM.
+        # Silently no-op on older OSes — the white title bar is acceptable
+        # and far more reliable than our previous custom one.
         try:
-            import tkinter as tk
-            from tkinter import ttk
-        except ImportError:
-            log.error("tkinter unavailable — main window disabled.")
-            self._ready.set()
-            return
+            import ctypes
+            from ctypes import wintypes
+            top.update_idletasks()
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            hwnd = top.winfo_id()
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                ctypes.byref(value), ctypes.sizeof(value),
+            )
+        except Exception as exc:
+            log.debug("DWM dark title bar skipped: %s", exc)
 
-        root = tk.Tk()
-        root.title(f"STT by MarkSoft")
-        root.configure(bg=self.BG)
-        root.geometry(f"{self.W}x{self.H}")
+        # Centre on primary monitor
+        top.update_idletasks()
+        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+        top.geometry(f"+{(sw - self.W) // 2}+{(sh - self.H) // 2}")
 
-        cfg = (self._get_config() or {})
-        self._native_titlebar = bool(cfg.get("use_native_titlebar", False))
-        if not self._native_titlebar:
-            root.overrideredirect(True)
-        else:
-            # Try to darken the native title bar on Windows 11
-            try:
-                import ctypes
-                from ctypes import wintypes
-                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-                hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or \
-                       root.winfo_id()
-                value = ctypes.c_int(1)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    wintypes.HWND(hwnd),
-                    ctypes.c_uint(DWMWA_USE_IMMERSIVE_DARK_MODE),
-                    ctypes.byref(value), ctypes.sizeof(value),
-                )
-            except Exception as exc:
-                log.debug("DWM dark title bar skipped: %s", exc)
-        root.minsize(420, 480)
+        # Branded window / taskbar icon
+        self._set_window_icon(top)
 
-        # Position: centred on the primary monitor
-        root.update_idletasks()
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.geometry(f"+{(sw - self.W) // 2}+{(sh - self.H) // 2}")
-
-        # Branded icon — held on self so it isn't garbage-collected
-        self._set_window_icon(root)
-
-        # Make an override-redirect window appear in the taskbar + Alt-Tab
-        if not self._native_titlebar:
-            root.after(10, lambda: self._make_appear_in_taskbar(root))
-
-        # ── ttk base style — proper dark theme, including Combobox ───────
-        style = ttk.Style(root)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        # ── ttk dark style (applies to this Toplevel and its children) ───
+        style = ttk.Style(top)
         style.configure(".", background=self.BG, foreground=self.FG,
                         fieldbackground=self.BG_ELEV, bordercolor=self.BORDER,
                         lightcolor=self.BG, darkcolor=self.BG,
                         insertcolor=self.FG, selectbackground=self.ACCENT,
                         selectforeground="#ffffff")
-        style.configure("TFrame", background=self.BG)
+        style.configure("TFrame",      background=self.BG)
         style.configure("Card.TFrame", background=self.BG_CARD)
         style.configure("Elev.TFrame", background=self.BG_ELEV)
 
-        # Combobox — the default often leaks native white on Windows
         style.configure("TCombobox",
                         fieldbackground=self.BG_ELEV,
                         background=self.BG_ELEV,
@@ -1816,14 +1838,13 @@ class MainWindow:
                   selectforeground=[("readonly", self.FG)],
                   foreground=[("readonly", self.FG)],
                   bordercolor=[("active", self.ACCENT)])
-        root.option_add("*TCombobox*Listbox.background",       self.BG_ELEV)
-        root.option_add("*TCombobox*Listbox.foreground",       self.FG)
-        root.option_add("*TCombobox*Listbox.selectBackground", self.ACCENT)
-        root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
-        root.option_add("*TCombobox*Listbox.borderWidth",      0)
-        root.option_add("*TCombobox*Listbox.font",             ("Segoe UI", 10))
+        top.option_add("*TCombobox*Listbox.background",       self.BG_ELEV)
+        top.option_add("*TCombobox*Listbox.foreground",       self.FG)
+        top.option_add("*TCombobox*Listbox.selectBackground", self.ACCENT)
+        top.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        top.option_add("*TCombobox*Listbox.borderWidth",      0)
+        top.option_add("*TCombobox*Listbox.font",             ("Segoe UI", 10))
 
-        # Scrollbar — minimal dark
         style.configure("Vertical.TScrollbar",
                         background=self.BG_ELEV, troughcolor=self.BG,
                         bordercolor=self.BG, arrowcolor=self.FG_DIM,
@@ -1832,12 +1853,9 @@ class MainWindow:
                   background=[("active", self.BG_HOVER)])
 
         # ── Build the UI ─────────────────────────────────────────────────
-        self._root = root
-        if not self._native_titlebar:
-            self._build_title_bar(root)
-            tk.Frame(root, bg=self.BORDER_SOFT, height=1).pack(fill="x", side="top")
+        self._top = top
 
-        body = tk.Frame(root, bg=self.BG)
+        body = tk.Frame(top, bg=self.BG)
         body.pack(fill="both", expand=True, side="top")
 
         self._build_status_strip(body)
@@ -1847,29 +1865,22 @@ class MainWindow:
         self._build_footer(body)
 
         # Drawer sits on top of body — placed absolute
-        self._build_drawer(root)
+        self._build_drawer(top)
 
-        root.bind("<Escape>", lambda _e: self._escape_key())
-        root.bind("<Configure>", self._on_configure)
-        # Native mode: the window-manager close button should hide to tray,
-        # not terminate the app (matches the custom-titlebar × behaviour).
-        if self._native_titlebar:
-            root.protocol("WM_DELETE_WINDOW", self.hide)
+        top.bind("<Escape>", lambda _e: self._escape_key())
+        top.bind("<Configure>", self._on_configure)
+        # X button hides to tray (hotkey + tray + transcription keep working)
+        top.protocol("WM_DELETE_WINDOW", self.hide)
 
-        self._ready.set()
         self._tick()
-        try:
-            root.mainloop()
-        except Exception as exc:
-            log.debug("Main window mainloop ended: %s", exc)
 
-    # ── Icon + Windows taskbar integration ────────────────────────────────────
+    # ── Icon helper ───────────────────────────────────────────────────────────
 
-    def _set_window_icon(self, root) -> None:
+    def _set_window_icon(self, top) -> None:
         try:
             from PIL import ImageTk
             self._wm_icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))
-            root.iconphoto(True, self._wm_icon)
+            top.iconphoto(True, self._wm_icon)
         except Exception as exc:
             log.debug("iconphoto failed: %s", exc)
         # .ico fallback so the Windows taskbar / Alt-Tab get a clean icon
@@ -1877,131 +1888,12 @@ class MainWindow:
             import tempfile, os
             path = os.path.join(tempfile.gettempdir(), f"stt_{APP_VERSION}.ico")
             _make_icon(AppState.IDLE).save(
-                path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
+                path, format="ICO",
+                sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
             )
-            root.iconbitmap(default=path)
+            top.iconbitmap(default=path)
         except Exception as exc:
             log.debug("iconbitmap fallback failed: %s", exc)
-
-    def _make_appear_in_taskbar(self, root) -> None:
-        """Override-redirect windows hide from the taskbar by default on
-        Windows. Toggle WS_EX_APPWINDOW so the OS treats us as a top-level app."""
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-            GWL_EXSTYLE = -20
-            WS_EX_APPWINDOW  = 0x00040000
-            WS_EX_TOOLWINDOW = 0x00000080
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            # Hide → set → show so the shell picks up the style change
-            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
-            ctypes.windll.user32.ShowWindow(hwnd, 5)  # SW_SHOW
-        except Exception as exc:
-            log.debug("Taskbar style fix skipped: %s", exc)
-
-    # ── Title bar (drag + min/max/close) ──────────────────────────────────────
-
-    def _build_title_bar(self, root) -> None:
-        bar = tk.Frame(root, bg=self.BG, height=self.TITLE_H)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
-
-        # Left: branded icon + wordmark
-        try:
-            from PIL import ImageTk
-            icon_img = _make_icon(AppState.IDLE).resize((22, 22))
-            self._tb_icon = ImageTk.PhotoImage(icon_img)
-            tk.Label(bar, image=self._tb_icon, bg=self.BG
-                     ).pack(side="left", padx=(12, 8), pady=9)
-        except Exception:
-            pass
-        tk.Label(bar, text="STT", bg=self.BG, fg=self.FG,
-                 font=("Segoe UI Semibold", 10)).pack(side="left")
-        tk.Label(bar, text=" by MarkSoft", bg=self.BG, fg=self.FG_DIM,
-                 font=("Segoe UI", 9)).pack(side="left")
-
-        # Right: window buttons  (— □ ×)
-        close_btn = self._window_btn(bar, "\u2715", self.hide,
-                                     hover_bg=self.REC, hover_fg="#ffffff")
-        close_btn.pack(side="right")
-        max_btn = self._window_btn(bar, "\u25A1", self._toggle_max)
-        max_btn.pack(side="right")
-        min_btn = self._window_btn(bar, "\u2012", self._minimize)
-        min_btn.pack(side="right")
-
-        # Drag on any empty part of the bar (not on icon/label/buttons)
-        for w in (bar,):
-            w.bind("<Button-1>",  self._drag_start)
-            w.bind("<B1-Motion>", self._drag_motion)
-            w.bind("<Double-Button-1>", lambda _e: self._toggle_max())
-        # Let clicks on labels still drag
-        for child in bar.winfo_children():
-            if isinstance(child, tk.Label):
-                child.bind("<Button-1>",  self._drag_start)
-                child.bind("<B1-Motion>", self._drag_motion)
-
-    def _window_btn(self, parent, symbol: str, command,
-                    hover_bg: str | None = None,
-                    hover_fg: str | None = None):
-        hb = hover_bg or self.BG_HOVER
-        hf = hover_fg or self.FG
-        b = tk.Label(parent, text=symbol, bg=self.BG, fg=self.FG_DIM,
-                     font=("Segoe UI", 11), cursor="hand2",
-                     padx=14, pady=0)
-        def on_enter(_e): b.configure(bg=hb, fg=hf)
-        def on_leave(_e): b.configure(bg=self.BG, fg=self.FG_DIM)
-        b.bind("<Enter>", on_enter)
-        b.bind("<Leave>", on_leave)
-        b.bind("<Button-1>", lambda _e: command())
-        return b
-
-    def _drag_start(self, event) -> None:
-        self._drag_off = (event.x_root - self._root.winfo_x(),
-                          event.y_root - self._root.winfo_y())
-
-    def _drag_motion(self, event) -> None:
-        if getattr(self, "_drag_off", None) is None:
-            return
-        ox, oy = self._drag_off
-        self._root.geometry(f"+{event.x_root - ox}+{event.y_root - oy}")
-
-    def _minimize(self) -> None:
-        # Use Tk's iconify — our show() path handles every restoration case
-        # (withdrawn, iconified, minimised-via-SW_MINIMIZE) via both deiconify
-        # and ShowWindow, so there's no need for a bespoke minimise path.
-        try:
-            self._root.iconify()
-        except Exception:
-            self._root.withdraw()
-
-    def _toggle_max(self) -> None:
-        if self._is_maximized:
-            if self._pre_max_geom:
-                self._root.geometry(self._pre_max_geom)
-            self._is_maximized = False
-        else:
-            self._pre_max_geom = self._root.geometry()
-            x, y, w, h = self._get_work_area()
-            self._root.geometry(f"{w}x{h}+{x}+{y}")
-            self._is_maximized = True
-
-    def _get_work_area(self) -> tuple[int, int, int, int]:
-        try:
-            import ctypes
-            from ctypes import wintypes
-            SPI_GETWORKAREA = 0x0030
-            rect = wintypes.RECT()
-            ctypes.windll.user32.SystemParametersInfoW(
-                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0,
-            )
-            return (rect.left, rect.top,
-                    rect.right - rect.left, rect.bottom - rect.top)
-        except Exception:
-            return (0, 0,
-                    self._root.winfo_screenwidth(),
-                    self._root.winfo_screenheight())
 
     def _escape_key(self) -> None:
         if self._drawer_open:
@@ -2010,7 +1902,7 @@ class MainWindow:
             self.hide()
 
     def _on_configure(self, event) -> None:
-        if event.widget is not self._root:
+        if event.widget is not self._top:
             return
         if self._drawer_open:
             self._place_drawer(open_=True, animate=False)
@@ -2018,6 +1910,7 @@ class MainWindow:
     # ── Status strip + waveform ───────────────────────────────────────────────
 
     def _build_status_strip(self, parent) -> None:
+        import tkinter as tk
         strip = tk.Frame(parent, bg=self.BG, height=self.STATUS_H)
         strip.pack(fill="x", side="top", padx=18, pady=(14, 0))
         strip.pack_propagate(False)
@@ -2054,6 +1947,7 @@ class MainWindow:
         self._widgets["hint"] = hint_lbl
 
     def _build_waveform(self, parent) -> None:
+        import tkinter as tk
         holder = tk.Frame(parent, bg=self.BG)
         # Not packed yet — we show it only while recording/transcribing
         wave = tk.Canvas(holder, height=self.WAVE_H, bg=self.BG,
@@ -2065,6 +1959,7 @@ class MainWindow:
     # ── History + preview ─────────────────────────────────────────────────────
 
     def _build_history(self, parent) -> None:
+        import tkinter as tk
         # Section label
         label_row = tk.Frame(parent, bg=self.BG)
         label_row.pack(fill="x", side="top", padx=18, pady=(14, 6))
@@ -2127,7 +2022,7 @@ class MainWindow:
 
         preview_text = tk.Text(inner, height=4, bg=self.BG_CARD, fg=self.FG,
                                bd=0, highlightthickness=0,
-                               wrap="word", padx=12, pady=(6, 10),
+                               wrap="word", padx=12, pady=8,
                                font=("Segoe UI", 10))
         preview_text.pack(fill="x")
         preview_text.configure(state="disabled")
@@ -2182,6 +2077,7 @@ class MainWindow:
     # ── Action row + footer ───────────────────────────────────────────────────
 
     def _build_actions(self, parent) -> None:
+        import tkinter as tk
         row = tk.Frame(parent, bg=self.BG)
         row.pack(fill="x", side="top", padx=18, pady=(12, 10))
 
@@ -2210,6 +2106,7 @@ class MainWindow:
         self._widgets["rec_btn"] = rec_btn
 
     def _build_footer(self, parent) -> None:
+        import tkinter as tk
         import webbrowser
         tk.Frame(parent, height=1, bg=self.BORDER_SOFT
                  ).pack(fill="x", side="top")
@@ -2253,9 +2150,7 @@ class MainWindow:
                           highlightthickness=1,
                           highlightbackground=self.BORDER)
         # Off-screen right initially
-        drawer.place(x=self.W, y=self.TITLE_H + 1,
-                     width=self.DRAWER_W,
-                     height=self.H - self.TITLE_H - 1)
+        drawer.place(x=self.W, y=0, width=self.DRAWER_W, height=self.H)
         self._drawer = drawer
         self._drawer_open = False
 
@@ -2346,17 +2241,16 @@ class MainWindow:
         self._widgets["lang_var"] = lang_var
 
     def _place_drawer(self, *, open_: bool, animate: bool = True) -> None:
-        if self._root is None or self._drawer is None:
+        if self._top is None or self._drawer is None:
             return
-        W = self._root.winfo_width() or self.W
-        H = self._root.winfo_height() or self.H
+        W = self._top.winfo_width() or self.W
+        H = self._top.winfo_height() or self.H
         target_x = W - self.DRAWER_W if open_ else W
         current_x = self._drawer.winfo_x() if self._drawer.winfo_ismapped() else W
 
         if not animate:
-            self._drawer.place(x=target_x, y=self.TITLE_H + 1,
-                               width=self.DRAWER_W,
-                               height=H - self.TITLE_H - 1)
+            self._drawer.place(x=target_x, y=0,
+                               width=self.DRAWER_W, height=H)
             self._drawer.lift()
             return
 
@@ -2364,12 +2258,10 @@ class MainWindow:
             t = i / total
             e = 1 - (1 - t) ** 3         # ease-out cubic
             x = int(current_x + (target_x - current_x) * e)
-            self._drawer.place(x=x, y=self.TITLE_H + 1,
-                               width=self.DRAWER_W,
-                               height=H - self.TITLE_H - 1)
+            self._drawer.place(x=x, y=0, width=self.DRAWER_W, height=H)
             self._drawer.lift()
             if i < total:
-                self._root.after(14, lambda: step(i + 1, total))
+                self._top.after(14, lambda: step(i + 1, total))
         step()
 
     def _toggle_drawer(self) -> None:
@@ -2405,7 +2297,7 @@ class MainWindow:
 
     def _tick(self) -> None:
         import math
-        if self._root is None:
+        if self._top is None:
             return
         w = self._widgets
         self._wave_phase += 1
@@ -2525,102 +2417,45 @@ class MainWindow:
                     hist.insert("end", f"  {ts}   {txt}")
                 w["hist_data"] = entries[:25]
 
-        self._root.after(33, self._tick)
+        self._top.after(33, self._tick)
 
     # ── Public (thread-safe) ──────────────────────────────────────────────────
 
-    def show(self) -> None:
-        log.info("MainWindow.show() requested")
-        if self._root is None:
-            log.warning("MainWindow.show(): _root is None — window thread may have died")
+    def _do_show(self) -> None:
+        """Runs on the UI thread."""
+        if self._top is None:
+            log.warning("MainWindow._do_show: Toplevel not yet built")
             return
-
-        def _apply():
-            # 1. Un-withdraw / un-iconify at the Tk level
-            try:
-                self._root.deiconify()
-            except Exception as exc:
-                log.debug("deiconify failed: %s", exc)
-
-            # 2. Drive Windows API — handles SW_MINIMIZE and SW_HIDE states
-            hwnd = 0
-            try:
-                import ctypes
-                hwnd = self._root.winfo_id()
-                parent = ctypes.windll.user32.GetParent(hwnd)
-                if parent:
-                    hwnd = parent
-                SW_SHOW    = 5
-                SW_RESTORE = 9
-                ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
-                ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
-            except Exception as exc:
-                log.debug("ShowWindow failed: %s", exc)
-
-            # 3. Reposition if the window drifted off-screen (some minimize paths
-            #    leave it at -32000,-32000). Recenter on the primary monitor.
-            try:
-                self._root.update_idletasks()
-                x  = self._root.winfo_x()
-                y  = self._root.winfo_y()
-                sw = self._root.winfo_screenwidth()
-                sh = self._root.winfo_screenheight()
-                if x < -100 or y < -100 or x > sw - 50 or y > sh - 50:
-                    w = self._root.winfo_width()  or self.W
-                    h = self._root.winfo_height() or self.H
-                    self._root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
-                    log.info("Window was off-screen (%d,%d); recentred", x, y)
-            except Exception as exc:
-                log.debug("recenter failed: %s", exc)
-
-            # 4. Topmost-flash to punch through whatever has focus right now
-            try:
-                self._root.attributes("-topmost", True)
-                self._root.update_idletasks()
-                self._root.attributes("-topmost", False)
-            except Exception:
-                pass
-
-            # 5. Lift / focus / SetForegroundWindow — the usual dance
-            try:
-                self._root.lift()
-                self._root.focus_force()
-            except Exception:
-                pass
-            if hwnd:
-                try:
-                    import ctypes
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-
-            try:
-                state = self._root.state()
-                geom  = self._root.geometry()
-                log.info("MainWindow restored — state=%s, geom=%s", state, geom)
-            except Exception:
-                pass
-
         try:
-            self._root.after(0, _apply)
+            self._top.deiconify()
+            self._top.lift()
+            self._top.focus_force()
+            self._top.attributes("-topmost", True)
+            self._top.after(250, lambda: self._top.attributes("-topmost", False))
         except Exception as exc:
-            log.debug("show after() failed: %s", exc)
+            log.debug("show failed: %s", exc)
+
+    def show(self) -> None:
+        """Thread-safe: schedule restore on the UI thread."""
+        self._ui.enqueue(self._do_show)
 
     def hide(self) -> None:
-        if self._root is None:
-            return
-        try:
-            self._root.after(0, self._root.withdraw)
-        except Exception:
-            pass
+        def _do_hide():
+            if self._top is not None:
+                try:
+                    self._top.withdraw()
+                except Exception:
+                    pass
+        self._ui.enqueue(_do_hide)
 
     def shutdown(self) -> None:
-        if self._root is None:
-            return
-        try:
-            self._root.after(0, self._root.destroy)
-        except Exception:
-            pass
+        def _destroy():
+            if self._top is not None:
+                try:
+                    self._top.destroy()
+                except Exception:
+                    pass
+        self._ui.enqueue(_destroy)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2646,7 +2481,10 @@ class STTApp:
         )
         self.transcriber = self._make_transcriber()
 
-        # On-screen overlay (created lazily in run() so Tk starts cleanly)
+        # The single Tk-owning thread. Everything that draws goes through this.
+        self.ui: UIManager | None = None
+
+        # Created lazily in run() once the UI thread is alive.
         self.overlay: Overlay | None = None
         self.main_window: MainWindow | None = None
 
@@ -2780,8 +2618,7 @@ class STTApp:
     # ── Update checking ───────────────────────────────────────────────────────
 
     def _show_whats_new(self, *, force: bool = False) -> None:
-        """Fetch release notes for APP_VERSION and show the 'What's new' card.
-        When `force=False`, we only show once per version (last_seen_version)."""
+        """Fetch release notes for APP_VERSION and show the 'What's new' card."""
         def _worker():
             try:
                 rel = _fetch_release_for_tag(f"v{APP_VERSION}")
@@ -2802,16 +2639,12 @@ class STTApp:
             }
 
             def _on_dismiss():
-                # Record that this version's notes have been seen
                 self.config["last_seen_version"] = APP_VERSION
                 save_config(self.config)
 
-            threading.Thread(
-                target=show_update_dialog,
-                args=(update,),
-                kwargs={"mode": "whatsnew", "on_dismiss": _on_dismiss},
-                name="whatsnew-dialog", daemon=True,
-            ).start()
+            if self.ui is not None:
+                show_update_dialog(self.ui, update,
+                                   mode="whatsnew", on_dismiss=_on_dismiss)
         threading.Thread(target=_worker, name="whatsnew-fetch",
                          daemon=True).start()
 
@@ -2830,22 +2663,15 @@ class STTApp:
             save_config(self.config)
 
     def _check_updates(self, *, manual: bool) -> None:
-        """Background check. If newer release exists, show the pop-up.
-        When `manual`, always surface a result (pop-up or notification)."""
+        """Background check. If newer release exists, show the pop-up."""
         def _worker():
             try:
                 upd = check_for_update(force=manual)
             except Exception as exc:
                 log.debug("Update check error: %s", exc)
                 upd = None
-            if upd:
-                try:
-                    threading.Thread(
-                        target=show_update_dialog, args=(upd,),
-                        name="update-dialog", daemon=True,
-                    ).start()
-                except Exception:
-                    pass
+            if upd and self.ui is not None:
+                show_update_dialog(self.ui, upd)
             elif manual:
                 self._notify(f"You're up to date.  (v{APP_VERSION})")
         threading.Thread(target=_worker, name="update-check",
@@ -2857,11 +2683,8 @@ class STTApp:
             save_config(self.config)
             self._register_hotkey()
             self._notify(f"Hotkey updated → '{new_key}'")
-        threading.Thread(
-            target=show_hotkey_dialog,
-            args=(self.config["hotkey"], on_set),
-            daemon=True,
-        ).start()
+        if self.ui is not None:
+            show_hotkey_dialog(self.ui, self.config["hotkey"], on_set)
 
     def _ui_change_model(self, name: str) -> None:
         if self.config.get("model") == name:
@@ -2997,21 +2820,11 @@ class STTApp:
             self._show_whats_new(force=True)
 
         def _open_history(icon, item):
-            threading.Thread(target=show_history_window,
-                             name="history-window", daemon=True).start()
+            if self.ui is not None:
+                show_history_window(self.ui)
 
         def _set_hotkey(icon, item):
-            def on_set(new_key: str):
-                self.config["hotkey"] = new_key
-                save_config(self.config)
-                self._register_hotkey()
-                self._notify(f"Hotkey updated → '{new_key}'")
-
-            threading.Thread(
-                target=show_hotkey_dialog,
-                args=(self.config["hotkey"], on_set),
-                daemon=True,
-            ).start()
+            self._ui_change_hotkey()
 
         def _quit(icon, item):
             log.info("Quit requested.")
@@ -3066,21 +2879,32 @@ class STTApp:
     def run(self) -> None:
         log.info("STT (Speech to text) starting… (config: %s)", CONFIG_PATH)
 
-        # Pre-open the mic so the first press records instantly
+        # Step 1 — start the single Tk-owning UI thread. Everything that
+        # draws (overlay, main window, dialogs) is a Toplevel of this root.
+        self.ui = UIManager()
+        try:
+            self.ui.start()
+        except Exception as exc:
+            log.error("UI subsystem failed to start: %s", exc)
+            self.ui = None
+
+        # Step 2 — pre-open the mic so the first press records instantly
         self.recorder.prime()
 
-        # On-screen indicator (optional)
-        if self.config.get("show_overlay", True):
+        # Step 3 — create the overlay (thread-safe; builds on the UI thread)
+        if self.ui is not None and self.config.get("show_overlay", True):
             try:
-                self.overlay = Overlay(get_level=lambda: self.recorder.level)
+                self.overlay = Overlay(self.ui,
+                                       get_level=lambda: self.recorder.level)
             except Exception as exc:
                 log.warning("Overlay init failed: %s", exc)
                 self.overlay = None
 
-        # Main desktop window (optional)
-        if self.config.get("show_main_window", True):
+        # Step 4 — create the main window (also builds on the UI thread)
+        if self.ui is not None and self.config.get("show_main_window", True):
             try:
                 self.main_window = MainWindow(
+                    ui=self.ui,
                     get_level=lambda: self.recorder.level,
                     get_state=lambda: self.state,
                     get_config=lambda: self.config,
@@ -3089,9 +2913,8 @@ class STTApp:
                     on_change_hotkey=self._ui_change_hotkey,
                     on_model_change=self._ui_change_model,
                     on_language_change=self._ui_change_language,
-                    on_open_history=lambda: threading.Thread(
-                        target=show_history_window, daemon=True
-                    ).start(),
+                    on_open_history=lambda: show_history_window(self.ui)
+                                            if self.ui else None,
                     on_quit=lambda: self.icon and self.icon.stop(),
                     on_show_whats_new=lambda: self._show_whats_new(force=True),
                 )
@@ -3101,15 +2924,15 @@ class STTApp:
                 log.warning("Main window init failed: %s", exc)
                 self.main_window = None
 
+        # Step 5 — hotkey hook and model load
         self._register_hotkey()
         self._load_model()
 
-        # Non-blocking "new version?" check 8 s after startup
+        # Step 6 — deferred update check + first-launch-after-update card
         threading.Timer(8.0, lambda: self._check_updates(manual=False)).start()
-
-        # First launch after an update → surface the "What's new" card once
         self._maybe_show_whats_new_on_launch()
 
+        # Step 7 — tray icon (blocking). Rest of the app runs on its own threads.
         self.icon = pystray.Icon(
             name="STT",
             icon=_make_icon(AppState.LOADING_MODEL),
@@ -3129,6 +2952,8 @@ class STTApp:
                 self.overlay.shutdown()
             if self.main_window is not None:
                 self.main_window.shutdown()
+            if self.ui is not None:
+                self.ui.shutdown()
         log.info("STT (Speech to text) shut down.")
 
 

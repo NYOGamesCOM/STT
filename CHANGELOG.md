@@ -5,6 +5,40 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.0 · 2026-04-21 — UI architecture rewrite (one Tk, one thread)
+
+This release fixes the two bugs that plagued v0.2.x — "Show window" that
+didn't open the window, and random crashes when opening the UI — by
+rewriting the Tkinter architecture from the ground up.
+
+### 🐛 Fixed
+- **Show window reliably works.** The tray menu's "Show window" (and
+  double-clicking the icon) now always restores the main window, no
+  matter how it was hidden.
+- **No more random UI crashes.** Opening history / update / what's-new
+  dialogs while the main window is alive no longer destabilises Tk.
+
+### ✨ Changed (under the hood)
+- All Tk work now runs on a single dedicated UI thread owned by a new
+  `UIManager`. Every window (overlay, main window, hotkey dialog,
+  history, update, what's-new) is a `Toplevel` of the shared hidden
+  root. Cross-thread work goes through a dispatch queue.
+- Dropped the custom dark title bar on the main window — it was the
+  source of the iconify / restore / taskbar-visibility flakiness. The
+  main window now uses the native Windows title bar, darkened on
+  Windows 11 via DWM. White on Windows 10 — acceptable tradeoff for
+  everything actually working reliably.
+- Removed ~150 lines of Win32 ctypes gymnastics (`SW_RESTORE`,
+  `SW_MINIMIZE`, `WS_EX_APPWINDOW`, topmost-flash, `SetForegroundWindow`,
+  manual maximize toggle, custom drag handlers) that existed only to
+  paper over the multi-threaded Tk issues.
+- `use_native_titlebar` config key removed (the native bar is always used now).
+
+### 🐛 Also fixed along the way
+- Preview pane's `tk.Text(pady=(6, 10))` was an invalid argument (tuples
+  aren't accepted as internal padding on Text widgets). Previously
+  silently swallowed by the broken threading; now a proper int.
+
 ## v0.2.3 · 2026-04-21 — Show-window fixes + native title bar escape hatch
 
 ### 🐛 Fixed
