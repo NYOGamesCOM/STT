@@ -5,6 +5,19 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.2.2 · 2026-04-21 — Reliable minimize & restore
+
+### 🐛 Fixed
+- Main window wouldn't come back after minimizing or closing — "Show window"
+  (tray right-click) and double-clicking the tray icon now reliably restore
+  it via the Win32 API. The custom-title-bar `−` minimise button also
+  uses `SW_MINIMIZE` directly so it's consistent with the restore path.
+
+### 💡 Heads-up
+- Windows tray icons respond to **right-click** for the menu and
+  **double-click** to open the main window. A single left-click does
+  nothing (OS convention; can't be changed).
+
 ## v0.2.1 · 2026-04-21 — Release notes that actually read like release notes
 
 ### ✨ New

@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -1939,6 +1939,20 @@ class MainWindow:
         self._root.geometry(f"+{event.x_root - ox}+{event.y_root - oy}")
 
     def _minimize(self) -> None:
+        # For overrideredirect windows on Windows, Tk's iconify() is flaky —
+        # go straight through the Win32 API so 'Show window' / SW_RESTORE
+        # can reliably bring it back.
+        try:
+            import ctypes
+            hwnd = self._root.winfo_id()
+            parent = ctypes.windll.user32.GetParent(hwnd)
+            if parent:
+                hwnd = parent
+            SW_MINIMIZE = 6
+            ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
+            return
+        except Exception as exc:
+            log.debug("ctypes minimize skipped: %s", exc)
         try:
             self._root.iconify()
         except Exception:
@@ -2500,10 +2514,35 @@ class MainWindow:
     def show(self) -> None:
         if self._root is None:
             return
+
         def _apply():
-            self._root.deiconify()
-            self._root.lift()
-            self._root.focus_force()
+            # deiconify() alone is unreliable for overrideredirect windows
+            # that were iconified or hidden via ShowWindow — layer ctypes.
+            try:
+                self._root.deiconify()
+            except Exception:
+                pass
+            try:
+                import ctypes
+                hwnd = self._root.winfo_id()
+                # Fall back to the parent HWND if Tk wraps us for some reason
+                parent = ctypes.windll.user32.GetParent(hwnd)
+                if parent:
+                    hwnd = parent
+                SW_RESTORE = 9
+                ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+                try:
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+            except Exception as exc:
+                log.debug("show() ctypes restore skipped: %s", exc)
+            try:
+                self._root.lift()
+                self._root.focus_force()
+            except Exception:
+                pass
+
         try:
             self._root.after(0, _apply)
         except Exception:
