@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.2.0"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -1113,18 +1113,18 @@ class Overlay:
     state change from other threads is marshalled via `root.after(0, ...)`.
     """
 
-    W, H = 220, 40                       # Pill size
-    MARGIN_BOTTOM = 56                   # Gap above taskbar
+    W, H = 200, 32                       # Thinner, more elegant proportions
+    MARGIN_BOTTOM = 52                   # Gap above taskbar
     LEVELS_N = 64                        # Rolling waveform sample buffer
 
-    # Palette
-    BG        = "#0e1014"
-    HL        = "#1d222c"                # 1-px inner top highlight
-    FG_DIM    = "#6b7280"
-    FG_REC    = "#ff4d60"
-    FG_REC_GL = "#ff7a88"                # glow ring
-    FG_TRANS  = "#f7a940"
-    FG_LOAD   = "#7cc4ff"
+    # iOS-inspired palette
+    BG        = "#0a0c10"                # near-black, slightly warmer
+    HL        = "#1b2029"                # 1-px inner top highlight
+    FG_DIM    = "#6e6e73"                # iOS secondary label
+    FG_REC    = "#ff453a"                # iOS systemRed (dark)
+    FG_REC_GL = "#ff6b62"                # halo
+    FG_TRANS  = "#ff9f0a"                # iOS systemOrange (dark)
+    FG_LOAD   = "#0a84ff"                # iOS systemBlue (dark)
     # Windows transparency key — any pixel this exact color becomes see-through
     KEY       = "#ff00ff"
 
@@ -1264,75 +1264,73 @@ class Overlay:
         eased = prev + (live - prev) * 0.35
         self._levels.append(eased)
 
-        # ── Left: pulsing state dot ───────────────────────────────────────
-        dot_x = 16
+        # ── Left: pulsing state dot (single soft halo, iOS-ish) ──────────
+        dot_x = 14
         if st == "recording":
             color = self.FG_REC
-            pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._phase / 6.0))
-            core = 3.0 + pulse * 1.2
-            # Soft halo (three rings)
-            for i, t in enumerate((0.18, 0.30, 0.55)):
-                rr = core + 3 + i * 2
-                ring = self._mix(self.BG, self.FG_REC_GL, t * pulse)
-                c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
-                              outline=ring, width=1)
+            pulse = 0.5 + 0.5 * math.sin(self._phase / 7.0)
+            core = 2.6 + pulse * 0.8
+            # One soft halo ring instead of three
+            rr = core + 3.2
+            halo = self._mix(self.BG, self.FG_REC_GL, 0.42 * (0.4 + pulse * 0.6))
+            c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
+                          outline=halo, width=1)
             c.create_oval(dot_x - core, cy - core, dot_x + core, cy + core,
                           fill=color, outline="")
         elif st == "transcribing":
             color = self.FG_TRANS
-            pulse = 0.5 + 0.5 * math.sin(self._phase / 5.0)
-            rr = 3 + pulse * 1.2
+            pulse = 0.5 + 0.5 * math.sin(self._phase / 5.5)
+            rr = 2.6 + pulse * 0.9
             c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
                           fill=color, outline="")
 
         # ── Right: elapsed timer (recording only) ─────────────────────────
-        right_edge = W - 16
+        right_edge = W - 13
         if st == "recording":
             elapsed = int(max(0, time.time() - self._rec_start))
             mm, ss = elapsed // 60, elapsed % 60
             c.create_text(
                 right_edge, cy, text=f"{mm}:{ss:02d}",
-                fill=self.FG_DIM, font=("Consolas", 10, "bold"),
+                fill=self.FG_DIM, font=("Consolas", 9, "bold"),
                 anchor="e",
             )
-            right_edge -= 42  # reserve space for the timer
+            right_edge -= 36
 
         # ── Center: waveform / dots ───────────────────────────────────────
-        wave_x0 = dot_x + 14
-        wave_x1 = right_edge - 8
+        wave_x0 = dot_x + 11
+        wave_x1 = right_edge - 6
         wave_w = max(20, wave_x1 - wave_x0)
 
         if st == "recording":
-            # Smooth mirrored curve — newest samples on the right, old scrolls left.
+            # Smooth mirrored curve, thinner line for a sleeker look
             n = len(self._levels)
             step = wave_w / (n - 1)
-            max_amp = (H - 14) / 2
+            max_amp = (H - 12) / 2
             top_pts: list[float] = []
             bot_pts: list[float] = []
             phase = self._phase / 4.0
             for i, v in enumerate(self._levels):
                 x = wave_x0 + i * step
-                # Small perpendicular wiggle so flat levels still breathe
                 wiggle = 0.85 + 0.15 * math.sin(phase + i * 0.35)
                 a = v * max_amp * wiggle
                 top_pts += [x, cy - a]
                 bot_pts += [x, cy + a]
-            c.create_line(*top_pts, smooth=True, width=2.0,
+            c.create_line(*top_pts, smooth=True, width=1.5,
                           fill=self.FG_REC,
                           capstyle="round", joinstyle="round")
-            c.create_line(*bot_pts, smooth=True, width=2.0,
+            c.create_line(*bot_pts, smooth=True, width=1.5,
                           fill=self.FG_REC,
                           capstyle="round", joinstyle="round")
 
         elif st == "transcribing":
-            # Three breathing dots, centered
-            gap = 14
+            # Three breathing dots, tighter spacing
+            gap = 11
             mid_x = (wave_x0 + wave_x1) // 2
             for i in range(3):
                 px = mid_x + (i - 1) * gap
-                ph = self._phase / 6.0 + i * 0.75
+                ph = self._phase / 6.0 + i * 0.7
                 amp = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(ph))
-                sz = 2.0 + amp * 2.2
+                sz = 1.6 + amp * 1.8
                 c.create_oval(px - sz, cy - sz, px + sz, cy + sz,
                               fill=self.FG_TRANS, outline="")
 
@@ -1398,19 +1396,38 @@ class Overlay:
 
 class MainWindow:
     """
-    Dark-themed desktop window. Runs its own Tk root on a daemon thread.
-    All state updates from other threads go through `root.after(0, ...)`.
+    Fully dark-themed desktop window with a custom title bar, compact
+    status strip, history-first layout, click-to-preview pane, and a
+    slide-in Settings drawer from the right.
 
-    Callbacks (all optional):
-      on_record_toggle()  — click the big record button
-      on_change_hotkey()  — "Change" button next to hotkey label
-      on_model_change(m)  — model dropdown
-      on_language_change(l) — language dropdown
-      on_open_history()   — "Open full history" button
-      on_quit()           — File menu Quit
+    Runs its own Tk root on a daemon thread; every state update from
+    other threads is marshalled via `root.after(0, ...)`.
     """
 
-    W, H = 480, 640
+    # Proportions — calmer, tighter than before
+    W, H = 460, 600
+    TITLE_H = 40
+    STATUS_H = 44
+    WAVE_H = 28
+    FOOTER_H = 34
+    DRAWER_W = 300
+
+    # Palette (iOS-inspired, reused by the drawer / preview / hover states)
+    BG          = "#0b0d11"
+    BG_CARD     = "#13161c"
+    BG_ELEV     = "#1a1e26"
+    BG_HOVER    = "#222832"
+    BORDER      = "#242a33"
+    BORDER_SOFT = "#1c2028"
+    FG          = "#e9ecf2"
+    FG_DIM      = "#8289a0"
+    FG_MUTE     = "#5a6071"
+    ACCENT      = "#0a84ff"        # iOS blue
+    ACCENT_H    = "#3398ff"
+    REC         = "#ff453a"        # iOS red
+    OK          = "#32d74b"        # iOS green
+    AMBER       = "#ff9f0a"        # iOS orange
+    CYAN        = "#7cc4ff"
 
     def __init__(
         self,
@@ -1440,10 +1457,14 @@ class MainWindow:
         self._root = None
         self._widgets: dict = {}
         self._wave_phase = 0
+        self._levels: list[float] = [0.0] * 80
         self._last_state = None
         self._last_hotkey = None
         self._last_model = None
         self._last_language = None
+        self._drawer_open = False
+        self._is_maximized = False
+        self._pre_max_geom = ""
         self._ready = threading.Event()
 
         threading.Thread(target=self._run, name="main-window", daemon=True).start()
@@ -1461,223 +1482,87 @@ class MainWindow:
             return
 
         root = tk.Tk()
-        root.title("STT (Speech to text)")
-        root.configure(bg=_UI_BG)
+        root.title(f"STT by MarkSoft")
+        root.configure(bg=self.BG)
         root.geometry(f"{self.W}x{self.H}")
-        root.minsize(420, 540)
+        root.overrideredirect(True)
+        root.minsize(420, 480)
 
-        # Use the branded STT tile as the title-bar / taskbar icon
-        try:
-            from PIL import ImageTk
-            self._wm_icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))
-            root.iconphoto(True, self._wm_icon)
-        except Exception as exc:
-            log.debug("Could not set window icon: %s", exc)
-
-        # Centre
+        # Position: centred on the primary monitor
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         root.geometry(f"+{(sw - self.W) // 2}+{(sh - self.H) // 2}")
 
-        # ── ttk dark style ───────────────────────────────────────────────
+        # Branded icon — held on self so it isn't garbage-collected
+        self._set_window_icon(root)
+
+        # Make an override-redirect window appear in the taskbar + Alt-Tab
+        root.after(10, lambda: self._make_appear_in_taskbar(root))
+
+        # ── ttk base style — proper dark theme, including Combobox ───────
         style = ttk.Style(root)
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure(".", background=_UI_BG, foreground=_UI_FG,
-                        fieldbackground=_UI_BG2, bordercolor=_UI_BORDER,
-                        lightcolor=_UI_BG, darkcolor=_UI_BG)
-        style.configure("TFrame", background=_UI_BG)
-        style.configure("Card.TFrame", background=_UI_BG2)
-        style.configure("TLabel", background=_UI_BG, foreground=_UI_FG,
-                        font=("Segoe UI", 10))
-        style.configure("Dim.TLabel", background=_UI_BG, foreground=_UI_FG_DIM,
-                        font=("Segoe UI", 9))
-        style.configure("Title.TLabel", background=_UI_BG, foreground=_UI_FG,
-                        font=("Segoe UI Semibold", 16))
-        style.configure("TButton", background=_UI_BG3, foreground=_UI_FG,
-                        bordercolor=_UI_BORDER, focusthickness=0,
-                        padding=(10, 6), font=("Segoe UI", 10))
-        style.map("TButton", background=[("active", _UI_BORDER)])
-        style.configure("Accent.TButton", background=_UI_ACCENT, foreground="#ffffff")
-        style.map("Accent.TButton", background=[("active", "#2563eb")])
-        style.configure("TCombobox", fieldbackground=_UI_BG2, background=_UI_BG3,
-                        foreground=_UI_FG, arrowcolor=_UI_FG, bordercolor=_UI_BORDER)
-        root.option_add("*TCombobox*Listbox.background", _UI_BG2)
-        root.option_add("*TCombobox*Listbox.foreground", _UI_FG)
-        root.option_add("*TCombobox*Listbox.selectBackground", _UI_ACCENT)
+        style.configure(".", background=self.BG, foreground=self.FG,
+                        fieldbackground=self.BG_ELEV, bordercolor=self.BORDER,
+                        lightcolor=self.BG, darkcolor=self.BG,
+                        insertcolor=self.FG, selectbackground=self.ACCENT,
+                        selectforeground="#ffffff")
+        style.configure("TFrame", background=self.BG)
+        style.configure("Card.TFrame", background=self.BG_CARD)
+        style.configure("Elev.TFrame", background=self.BG_ELEV)
+
+        # Combobox — the default often leaks native white on Windows
+        style.configure("TCombobox",
+                        fieldbackground=self.BG_ELEV,
+                        background=self.BG_ELEV,
+                        foreground=self.FG,
+                        arrowcolor=self.FG_DIM,
+                        bordercolor=self.BORDER,
+                        selectbackground=self.BG_ELEV,
+                        selectforeground=self.FG)
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", self.BG_ELEV)],
+                  selectbackground=[("readonly", self.BG_ELEV)],
+                  selectforeground=[("readonly", self.FG)],
+                  foreground=[("readonly", self.FG)],
+                  bordercolor=[("active", self.ACCENT)])
+        root.option_add("*TCombobox*Listbox.background",       self.BG_ELEV)
+        root.option_add("*TCombobox*Listbox.foreground",       self.FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", self.ACCENT)
         root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        root.option_add("*TCombobox*Listbox.borderWidth",      0)
+        root.option_add("*TCombobox*Listbox.font",             ("Segoe UI", 10))
 
-        outer = ttk.Frame(root, style="TFrame")
-        outer.pack(fill="both", expand=True, padx=18, pady=16)
+        # Scrollbar — minimal dark
+        style.configure("Vertical.TScrollbar",
+                        background=self.BG_ELEV, troughcolor=self.BG,
+                        bordercolor=self.BG, arrowcolor=self.FG_DIM,
+                        gripcount=0)
+        style.map("Vertical.TScrollbar",
+                  background=[("active", self.BG_HOVER)])
 
-        # ── Header ───────────────────────────────────────────────────────
-        header = ttk.Frame(outer, style="TFrame")
-        header.pack(fill="x")
-        ttk.Label(header, text="STT", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text=" · Speech to text", style="Dim.TLabel"
-                  ).pack(side="left", pady=(4, 0))
-
-        # ── Status card ──────────────────────────────────────────────────
-        card = tk.Frame(outer, bg=_UI_BG2, highlightthickness=1,
-                        highlightbackground=_UI_BORDER)
-        card.pack(fill="x", pady=(14, 12))
-
-        status_row = tk.Frame(card, bg=_UI_BG2)
-        status_row.pack(fill="x", padx=16, pady=(14, 4))
-        dot = tk.Canvas(status_row, width=16, height=16, bg=_UI_BG2,
-                        highlightthickness=0, bd=0)
-        dot.pack(side="left", padx=(0, 10))
-        status_lbl = tk.Label(status_row, text="LOADING", bg=_UI_BG2, fg=_UI_FG,
-                              font=("Segoe UI Semibold", 13))
-        status_lbl.pack(side="left")
-
-        hint_lbl = tk.Label(
-            card, text="Getting ready…",
-            bg=_UI_BG2, fg=_UI_FG_DIM, font=("Segoe UI", 10),
-            anchor="w",
-        )
-        hint_lbl.pack(fill="x", padx=16, pady=(0, 4))
-
-        # Live waveform canvas
-        wave = tk.Canvas(card, height=42, bg=_UI_BG2,
-                         highlightthickness=0, bd=0)
-        wave.pack(fill="x", padx=12, pady=(4, 14))
-
-        # ── Big record button ────────────────────────────────────────────
-        rec_btn = tk.Button(
-            outer, text="●  Click or hold Right Alt to record",
-            bg=_UI_ACCENT, fg="#ffffff", activebackground="#2563eb",
-            activeforeground="#ffffff", bd=0, relief="flat",
-            font=("Segoe UI Semibold", 11),
-            cursor="hand2",
-            command=lambda: self._cb_record and self._cb_record(),
-        )
-        rec_btn.pack(fill="x", ipady=12, pady=(0, 14))
-
-        # ── Settings rows ────────────────────────────────────────────────
-        def row(parent, label_text):
-            r = ttk.Frame(parent, style="TFrame")
-            r.pack(fill="x", pady=(0, 8))
-            ttk.Label(r, text=label_text, style="Dim.TLabel", width=10
-                      ).pack(side="left")
-            return r
-
-        # Hotkey
-        hot_row = row(outer, "Hotkey")
-        hk_val = tk.Label(hot_row, text="—", bg=_UI_BG, fg=_UI_FG,
-                          font=("Segoe UI Semibold", 10))
-        hk_val.pack(side="left")
-        ttk.Button(hot_row, text="Change",
-                   command=lambda: self._cb_hotkey and self._cb_hotkey()
-                   ).pack(side="right")
-
-        # Model
-        mod_row = row(outer, "Model")
-        mod_var = tk.StringVar(value="base")
-        mod_cb = ttk.Combobox(mod_row, textvariable=mod_var, state="readonly",
-                              values=["tiny", "base", "small"], width=12)
-        mod_cb.pack(side="left")
-        mod_cb.bind("<<ComboboxSelected>>",
-                    lambda _e: self._cb_model and self._cb_model(mod_var.get()))
-
-        # Language
-        lang_row = row(outer, "Language")
-        lang_var = tk.StringVar(value="en")
-        lang_cb = ttk.Combobox(
-            lang_row, textvariable=lang_var, state="readonly",
-            values=["auto", "en", "ro", "fr", "de", "es", "it", "pt", "nl", "pl", "ja", "zh"],
-            width=12,
-        )
-        lang_cb.pack(side="left")
-        lang_cb.bind("<<ComboboxSelected>>",
-                     lambda _e: self._cb_lang and self._cb_lang(lang_var.get()))
-
-        # ── Recent history ───────────────────────────────────────────────
-        ttk.Label(outer, text="Recent", style="Dim.TLabel"
-                  ).pack(anchor="w", pady=(10, 6))
-
-        hist_frame = tk.Frame(outer, bg=_UI_BG2, highlightthickness=1,
-                              highlightbackground=_UI_BORDER)
-        hist_frame.pack(fill="both", expand=True)
-        hist_sb = tk.Scrollbar(hist_frame, bg=_UI_BG2, troughcolor=_UI_BG,
-                               activebackground=_UI_BG3)
-        hist_sb.pack(side="right", fill="y")
-        hist = tk.Listbox(
-            hist_frame, bg=_UI_BG2, fg=_UI_FG,
-            selectbackground=_UI_ACCENT, selectforeground="#ffffff",
-            highlightthickness=0, bd=0, activestyle="none",
-            font=("Segoe UI", 9), yscrollcommand=hist_sb.set,
-        )
-        hist.pack(side="left", fill="both", expand=True)
-        hist_sb.config(command=hist.yview)
-
-        def _copy_selected(_e=None):
-            sel = hist.curselection()
-            if not sel:
-                return
-            # Entries are stored as tuples in self._widgets["hist_data"]
-            data = self._widgets.get("hist_data") or []
-            i = sel[0]
-            if 0 <= i < len(data):
-                try:
-                    pyperclip.copy(data[i].get("text", ""))
-                except Exception:
-                    pass
-        hist.bind("<Double-Button-1>", _copy_selected)
-        hist.bind("<Return>", _copy_selected)
-
-        bottom_row = ttk.Frame(outer, style="TFrame")
-        bottom_row.pack(fill="x", pady=(8, 0))
-        ttk.Button(bottom_row, text="Open full history…",
-                   command=lambda: self._cb_history and self._cb_history()
-                   ).pack(side="left")
-        ttk.Button(bottom_row, text="Minimize to tray",
-                   command=self.hide).pack(side="right")
-
-        # ── Footer ───────────────────────────────────────────────────────
-        import webbrowser
-        tk.Frame(outer, height=1, bg=_UI_BORDER).pack(fill="x", pady=(14, 10))
-
-        footer = ttk.Frame(outer, style="TFrame")
-        footer.pack(fill="x")
-
-        # Left: version · GitHub link
-        left = ttk.Frame(footer, style="TFrame")
-        left.pack(side="left")
-        ttk.Label(left, text=f"STT v{APP_VERSION}",
-                  style="Dim.TLabel",
-                  font=("Segoe UI Semibold", 9)).pack(side="left")
-        ttk.Label(left, text="  ·  ", style="Dim.TLabel").pack(side="left")
-        gh_link = tk.Label(left, text="GitHub",
-                           bg=_UI_BG, fg=_UI_ACCENT, cursor="hand2",
-                           font=("Segoe UI", 9, "underline"))
-        gh_link.pack(side="left")
-        gh_link.bind("<Button-1>", lambda _e: webbrowser.open(GITHUB_URL))
-
-        # Right: "by MarkSoft" clickable wordmark
-        right = ttk.Frame(footer, style="TFrame")
-        right.pack(side="right")
-        ttk.Label(right, text="by ", style="Dim.TLabel").pack(side="left")
-        ms_link = tk.Label(right, text="MarkSoft",
-                           bg=_UI_BG, fg=_UI_ACCENT, cursor="hand2",
-                           font=("Segoe UI Semibold", 9, "underline"))
-        ms_link.pack(side="left")
-        ms_link.bind("<Button-1>", lambda _e: webbrowser.open(MARKSOFT_URL))
-
-        # ── State stash + bindings ───────────────────────────────────────
+        # ── Build the UI ─────────────────────────────────────────────────
         self._root = root
-        self._widgets = {
-            "dot": dot, "status": status_lbl, "hint": hint_lbl,
-            "wave": wave, "rec_btn": rec_btn,
-            "hk_val": hk_val, "mod_var": mod_var, "lang_var": lang_var,
-            "hist": hist, "hist_data": [],
-        }
+        self._build_title_bar(root)
+        tk.Frame(root, bg=self.BORDER_SOFT, height=1).pack(fill="x", side="top")
 
-        # Close (X) = hide to tray, not quit
-        root.protocol("WM_DELETE_WINDOW", self.hide)
-        root.bind("<Escape>", lambda _e: self.hide())
+        body = tk.Frame(root, bg=self.BG)
+        body.pack(fill="both", expand=True, side="top")
+
+        self._build_status_strip(body)
+        self._build_waveform(body)
+        self._build_history(body)
+        self._build_actions(body)
+        self._build_footer(body)
+
+        # Drawer sits on top of body — placed absolute
+        self._build_drawer(root)
+
+        root.bind("<Escape>", lambda _e: self._escape_key())
+        root.bind("<Configure>", self._on_configure)
 
         self._ready.set()
         self._tick()
@@ -1686,97 +1571,648 @@ class MainWindow:
         except Exception as exc:
             log.debug("Main window mainloop ended: %s", exc)
 
-    # ── Drawing / polling ─────────────────────────────────────────────────────
+    # ── Icon + Windows taskbar integration ────────────────────────────────────
 
-    _STATE_COLORS = {
-        "LOADING_MODEL": ("#6b80ff", "Loading model…"),
-        "IDLE":          ("#5ad48e", "Ready — hold Right Alt or click record."),
-        "RECORDING":     ("#ef4444", "Recording — release to transcribe."),
-        "TRANSCRIBING":  ("#f59e0b", "Transcribing…"),
+    def _set_window_icon(self, root) -> None:
+        try:
+            from PIL import ImageTk
+            self._wm_icon = ImageTk.PhotoImage(_make_icon(AppState.IDLE))
+            root.iconphoto(True, self._wm_icon)
+        except Exception as exc:
+            log.debug("iconphoto failed: %s", exc)
+        # .ico fallback so the Windows taskbar / Alt-Tab get a clean icon
+        try:
+            import tempfile, os
+            path = os.path.join(tempfile.gettempdir(), f"stt_{APP_VERSION}.ico")
+            _make_icon(AppState.IDLE).save(
+                path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
+            )
+            root.iconbitmap(default=path)
+        except Exception as exc:
+            log.debug("iconbitmap fallback failed: %s", exc)
+
+    def _make_appear_in_taskbar(self, root) -> None:
+        """Override-redirect windows hide from the taskbar by default on
+        Windows. Toggle WS_EX_APPWINDOW so the OS treats us as a top-level app."""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW  = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            # Hide → set → show so the shell picks up the style change
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
+            ctypes.windll.user32.ShowWindow(hwnd, 5)  # SW_SHOW
+        except Exception as exc:
+            log.debug("Taskbar style fix skipped: %s", exc)
+
+    # ── Title bar (drag + min/max/close) ──────────────────────────────────────
+
+    def _build_title_bar(self, root) -> None:
+        bar = tk.Frame(root, bg=self.BG, height=self.TITLE_H)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
+
+        # Left: branded icon + wordmark
+        try:
+            from PIL import ImageTk
+            icon_img = _make_icon(AppState.IDLE).resize((22, 22))
+            self._tb_icon = ImageTk.PhotoImage(icon_img)
+            tk.Label(bar, image=self._tb_icon, bg=self.BG
+                     ).pack(side="left", padx=(12, 8), pady=9)
+        except Exception:
+            pass
+        tk.Label(bar, text="STT", bg=self.BG, fg=self.FG,
+                 font=("Segoe UI Semibold", 10)).pack(side="left")
+        tk.Label(bar, text=" by MarkSoft", bg=self.BG, fg=self.FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+        # Right: window buttons  (— □ ×)
+        close_btn = self._window_btn(bar, "\u2715", self.hide,
+                                     hover_bg=self.REC, hover_fg="#ffffff")
+        close_btn.pack(side="right")
+        max_btn = self._window_btn(bar, "\u25A1", self._toggle_max)
+        max_btn.pack(side="right")
+        min_btn = self._window_btn(bar, "\u2012", self._minimize)
+        min_btn.pack(side="right")
+
+        # Drag on any empty part of the bar (not on icon/label/buttons)
+        for w in (bar,):
+            w.bind("<Button-1>",  self._drag_start)
+            w.bind("<B1-Motion>", self._drag_motion)
+            w.bind("<Double-Button-1>", lambda _e: self._toggle_max())
+        # Let clicks on labels still drag
+        for child in bar.winfo_children():
+            if isinstance(child, tk.Label):
+                child.bind("<Button-1>",  self._drag_start)
+                child.bind("<B1-Motion>", self._drag_motion)
+
+    def _window_btn(self, parent, symbol: str, command,
+                    hover_bg: str | None = None,
+                    hover_fg: str | None = None):
+        hb = hover_bg or self.BG_HOVER
+        hf = hover_fg or self.FG
+        b = tk.Label(parent, text=symbol, bg=self.BG, fg=self.FG_DIM,
+                     font=("Segoe UI", 11), cursor="hand2",
+                     padx=14, pady=0)
+        def on_enter(_e): b.configure(bg=hb, fg=hf)
+        def on_leave(_e): b.configure(bg=self.BG, fg=self.FG_DIM)
+        b.bind("<Enter>", on_enter)
+        b.bind("<Leave>", on_leave)
+        b.bind("<Button-1>", lambda _e: command())
+        return b
+
+    def _drag_start(self, event) -> None:
+        self._drag_off = (event.x_root - self._root.winfo_x(),
+                          event.y_root - self._root.winfo_y())
+
+    def _drag_motion(self, event) -> None:
+        if getattr(self, "_drag_off", None) is None:
+            return
+        ox, oy = self._drag_off
+        self._root.geometry(f"+{event.x_root - ox}+{event.y_root - oy}")
+
+    def _minimize(self) -> None:
+        try:
+            self._root.iconify()
+        except Exception:
+            self._root.withdraw()
+
+    def _toggle_max(self) -> None:
+        if self._is_maximized:
+            if self._pre_max_geom:
+                self._root.geometry(self._pre_max_geom)
+            self._is_maximized = False
+        else:
+            self._pre_max_geom = self._root.geometry()
+            x, y, w, h = self._get_work_area()
+            self._root.geometry(f"{w}x{h}+{x}+{y}")
+            self._is_maximized = True
+
+    def _get_work_area(self) -> tuple[int, int, int, int]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            SPI_GETWORKAREA = 0x0030
+            rect = wintypes.RECT()
+            ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0,
+            )
+            return (rect.left, rect.top,
+                    rect.right - rect.left, rect.bottom - rect.top)
+        except Exception:
+            return (0, 0,
+                    self._root.winfo_screenwidth(),
+                    self._root.winfo_screenheight())
+
+    def _escape_key(self) -> None:
+        if self._drawer_open:
+            self._close_drawer()
+        else:
+            self.hide()
+
+    def _on_configure(self, event) -> None:
+        if event.widget is not self._root:
+            return
+        if self._drawer_open:
+            self._place_drawer(open_=True, animate=False)
+
+    # ── Status strip + waveform ───────────────────────────────────────────────
+
+    def _build_status_strip(self, parent) -> None:
+        strip = tk.Frame(parent, bg=self.BG, height=self.STATUS_H)
+        strip.pack(fill="x", side="top", padx=18, pady=(14, 0))
+        strip.pack_propagate(False)
+
+        dot = tk.Canvas(strip, width=12, height=12, bg=self.BG,
+                        highlightthickness=0, bd=0)
+        dot.pack(side="left", pady=(2, 0))
+
+        status_lbl = tk.Label(strip, text="Loading",
+                              bg=self.BG, fg=self.FG,
+                              font=("Segoe UI Semibold", 11))
+        status_lbl.pack(side="left", padx=(10, 0))
+
+        tk.Label(strip, text=" ·  ",
+                 bg=self.BG, fg=self.FG_MUTE,
+                 font=("Segoe UI", 10)).pack(side="left")
+
+        hint_lbl = tk.Label(strip, text="getting ready…",
+                            bg=self.BG, fg=self.FG_DIM,
+                            font=("Segoe UI", 10))
+        hint_lbl.pack(side="left")
+
+        # Settings gear on the right
+        gear = tk.Label(strip, text="\u2699", bg=self.BG, fg=self.FG_DIM,
+                        cursor="hand2", font=("Segoe UI", 14),
+                        padx=6)
+        gear.pack(side="right")
+        gear.bind("<Enter>", lambda _e: gear.configure(fg=self.FG))
+        gear.bind("<Leave>", lambda _e: gear.configure(fg=self.FG_DIM))
+        gear.bind("<Button-1>", lambda _e: self._toggle_drawer())
+
+        self._widgets["dot"] = dot
+        self._widgets["status"] = status_lbl
+        self._widgets["hint"] = hint_lbl
+
+    def _build_waveform(self, parent) -> None:
+        holder = tk.Frame(parent, bg=self.BG)
+        # Not packed yet — we show it only while recording/transcribing
+        wave = tk.Canvas(holder, height=self.WAVE_H, bg=self.BG,
+                         highlightthickness=0, bd=0)
+        wave.pack(fill="x", padx=18, pady=(8, 4))
+        self._widgets["wave_holder"] = holder
+        self._widgets["wave"] = wave
+
+    # ── History + preview ─────────────────────────────────────────────────────
+
+    def _build_history(self, parent) -> None:
+        # Section label
+        label_row = tk.Frame(parent, bg=self.BG)
+        label_row.pack(fill="x", side="top", padx=18, pady=(14, 6))
+        tk.Label(label_row, text="RECENT",
+                 bg=self.BG, fg=self.FG_MUTE,
+                 font=("Segoe UI Semibold", 9)).pack(side="left")
+        tk.Frame(label_row, height=1, bg=self.BORDER_SOFT
+                 ).pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(6, 0))
+
+        # Container for list + preview
+        container = tk.Frame(parent, bg=self.BG)
+        container.pack(fill="both", expand=True, side="top", padx=18)
+
+        list_frame = tk.Frame(container, bg=self.BG_CARD,
+                              highlightthickness=1,
+                              highlightbackground=self.BORDER_SOFT)
+        list_frame.pack(fill="both", expand=True)
+
+        import tkinter.ttk as ttk
+        sb = ttk.Scrollbar(list_frame, style="Vertical.TScrollbar",
+                           orient="vertical")
+        sb.pack(side="right", fill="y")
+
+        hist = tk.Listbox(
+            list_frame,
+            bg=self.BG_CARD, fg=self.FG,
+            selectbackground=self.ACCENT, selectforeground="#ffffff",
+            highlightthickness=0, bd=0, activestyle="none",
+            font=("Segoe UI", 10),
+            yscrollcommand=sb.set,
+        )
+        hist.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        sb.config(command=hist.yview)
+
+        # Preview pane — shown when a row is clicked
+        preview_holder = tk.Frame(container, bg=self.BG)
+        # Not packed yet
+        inner = tk.Frame(preview_holder, bg=self.BG_CARD,
+                         highlightthickness=1, highlightbackground=self.BORDER_SOFT)
+        inner.pack(fill="x", pady=(8, 0))
+
+        head = tk.Frame(inner, bg=self.BG_CARD)
+        head.pack(fill="x", padx=12, pady=(8, 0))
+        preview_ts = tk.Label(head, text="", bg=self.BG_CARD, fg=self.FG_DIM,
+                              font=("Consolas", 9))
+        preview_ts.pack(side="left")
+
+        # Copy button
+        copy_btn = tk.Label(head, text="Copy", bg=self.BG_CARD, fg=self.ACCENT,
+                            cursor="hand2", font=("Segoe UI Semibold", 9))
+        copy_btn.pack(side="right")
+        copy_btn.bind("<Enter>", lambda _e: copy_btn.configure(fg=self.ACCENT_H))
+        copy_btn.bind("<Leave>", lambda _e: copy_btn.configure(fg=self.ACCENT))
+        # Close preview
+        close_prev = tk.Label(head, text="×", bg=self.BG_CARD, fg=self.FG_DIM,
+                              cursor="hand2", font=("Segoe UI", 12))
+        close_prev.pack(side="right", padx=(0, 10))
+        close_prev.bind("<Enter>", lambda _e: close_prev.configure(fg=self.FG))
+        close_prev.bind("<Leave>", lambda _e: close_prev.configure(fg=self.FG_DIM))
+
+        preview_text = tk.Text(inner, height=4, bg=self.BG_CARD, fg=self.FG,
+                               bd=0, highlightthickness=0,
+                               wrap="word", padx=12, pady=(6, 10),
+                               font=("Segoe UI", 10))
+        preview_text.pack(fill="x")
+        preview_text.configure(state="disabled")
+
+        def _hide_preview():
+            preview_holder.pack_forget()
+            try:
+                hist.selection_clear(0, "end")
+            except Exception:
+                pass
+        close_prev.bind("<Button-1>", lambda _e: _hide_preview())
+
+        def _select(_e=None):
+            sel = hist.curselection()
+            if not sel:
+                return
+            data = self._widgets.get("hist_data") or []
+            i = sel[0]
+            if 0 <= i < len(data):
+                e = data[i]
+                preview_ts.configure(text=(e.get("ts") or "").replace("T", " ")[:19])
+                preview_text.configure(state="normal")
+                preview_text.delete("1.0", "end")
+                preview_text.insert("1.0", e.get("text", ""))
+                preview_text.configure(state="disabled")
+                if not preview_holder.winfo_ismapped():
+                    preview_holder.pack(fill="x", side="top")
+
+        def _copy_current(_e=None):
+            sel = hist.curselection()
+            data = self._widgets.get("hist_data") or []
+            if sel and 0 <= sel[0] < len(data):
+                try:
+                    pyperclip.copy(data[sel[0]].get("text", ""))
+                    orig = copy_btn.cget("text")
+                    copy_btn.configure(text="Copied!")
+                    copy_btn.after(1200, lambda: copy_btn.configure(text=orig))
+                except Exception:
+                    pass
+        copy_btn.bind("<Button-1>", _copy_current)
+
+        hist.bind("<<ListboxSelect>>", _select)
+        hist.bind("<Double-Button-1>", _copy_current)
+        hist.bind("<Return>", _copy_current)
+
+        self._widgets["hist"] = hist
+        self._widgets["hist_data"] = []
+        self._widgets["preview_holder"] = preview_holder
+        self._widgets["preview_ts"] = preview_ts
+        self._widgets["preview_text"] = preview_text
+
+    # ── Action row + footer ───────────────────────────────────────────────────
+
+    def _build_actions(self, parent) -> None:
+        row = tk.Frame(parent, bg=self.BG)
+        row.pack(fill="x", side="top", padx=18, pady=(12, 10))
+
+        # Primary record button
+        rec_btn = tk.Label(row, text="\u25CF   Record",
+                           bg=self.ACCENT, fg="#ffffff",
+                           font=("Segoe UI Semibold", 10),
+                           padx=18, pady=8, cursor="hand2")
+        rec_btn.pack(side="left")
+        rec_btn.bind("<Enter>", lambda _e: rec_btn.configure(bg=self.ACCENT_H))
+        rec_btn.bind("<Leave>", lambda _e: rec_btn.configure(bg=self.ACCENT))
+        rec_btn.bind("<Button-1>",
+                     lambda _e: self._cb_record and self._cb_record())
+
+        # Secondary: open full history
+        hist_btn = tk.Label(row, text="Open full history \u2192",
+                            bg=self.BG, fg=self.FG_DIM,
+                            font=("Segoe UI", 10), cursor="hand2",
+                            padx=10, pady=8)
+        hist_btn.pack(side="right")
+        hist_btn.bind("<Enter>", lambda _e: hist_btn.configure(fg=self.FG))
+        hist_btn.bind("<Leave>", lambda _e: hist_btn.configure(fg=self.FG_DIM))
+        hist_btn.bind("<Button-1>",
+                      lambda _e: self._cb_history and self._cb_history())
+
+        self._widgets["rec_btn"] = rec_btn
+
+    def _build_footer(self, parent) -> None:
+        import webbrowser
+        tk.Frame(parent, height=1, bg=self.BORDER_SOFT
+                 ).pack(fill="x", side="top")
+        foot = tk.Frame(parent, bg=self.BG, height=self.FOOTER_H)
+        foot.pack(fill="x", side="top")
+        foot.pack_propagate(False)
+
+        left = tk.Frame(foot, bg=self.BG)
+        left.pack(side="left", padx=18)
+        tk.Label(left, text=f"STT v{APP_VERSION}",
+                 bg=self.BG, fg=self.FG_DIM,
+                 font=("Segoe UI Semibold", 9)).pack(side="left", pady=8)
+        tk.Label(left, text="  \u00b7  ", bg=self.BG, fg=self.FG_MUTE,
+                 font=("Segoe UI", 9)).pack(side="left", pady=8)
+        gh = tk.Label(left, text="GitHub", bg=self.BG, fg=self.ACCENT,
+                      cursor="hand2", font=("Segoe UI", 9, "underline"))
+        gh.pack(side="left", pady=8)
+        gh.bind("<Enter>", lambda _e: gh.configure(fg=self.ACCENT_H))
+        gh.bind("<Leave>", lambda _e: gh.configure(fg=self.ACCENT))
+        gh.bind("<Button-1>", lambda _e: webbrowser.open(GITHUB_URL))
+
+        right = tk.Frame(foot, bg=self.BG)
+        right.pack(side="right", padx=18)
+        tk.Label(right, text="by ", bg=self.BG, fg=self.FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", pady=8)
+        ms = tk.Label(right, text="MarkSoft", bg=self.BG, fg=self.ACCENT,
+                      cursor="hand2",
+                      font=("Segoe UI Semibold", 9, "underline"))
+        ms.pack(side="left", pady=8)
+        ms.bind("<Enter>", lambda _e: ms.configure(fg=self.ACCENT_H))
+        ms.bind("<Leave>", lambda _e: ms.configure(fg=self.ACCENT))
+        ms.bind("<Button-1>", lambda _e: webbrowser.open(MARKSOFT_URL))
+
+    # ── Settings drawer (slide-in from the right) ─────────────────────────────
+
+    def _build_drawer(self, root) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        drawer = tk.Frame(root, bg=self.BG_CARD,
+                          highlightthickness=1,
+                          highlightbackground=self.BORDER)
+        # Off-screen right initially
+        drawer.place(x=self.W, y=self.TITLE_H + 1,
+                     width=self.DRAWER_W,
+                     height=self.H - self.TITLE_H - 1)
+        self._drawer = drawer
+        self._drawer_open = False
+
+        # Header
+        header = tk.Frame(drawer, bg=self.BG_CARD, height=44)
+        header.pack(fill="x", side="top")
+        header.pack_propagate(False)
+        tk.Label(header, text="Settings",
+                 bg=self.BG_CARD, fg=self.FG,
+                 font=("Segoe UI Semibold", 12)
+                 ).pack(side="left", padx=16, pady=10)
+        close = tk.Label(header, text="\u2715", bg=self.BG_CARD, fg=self.FG_DIM,
+                         cursor="hand2", font=("Segoe UI", 11), padx=12)
+        close.pack(side="right", pady=4)
+        close.bind("<Enter>", lambda _e: close.configure(fg=self.FG))
+        close.bind("<Leave>", lambda _e: close.configure(fg=self.FG_DIM))
+        close.bind("<Button-1>", lambda _e: self._close_drawer())
+        tk.Frame(drawer, height=1, bg=self.BORDER_SOFT).pack(fill="x", side="top")
+
+        # Body
+        body = tk.Frame(drawer, bg=self.BG_CARD)
+        body.pack(fill="both", expand=True, side="top", padx=16, pady=14)
+
+        def section_label(txt):
+            tk.Label(body, text=txt.upper(),
+                     bg=self.BG_CARD, fg=self.FG_MUTE,
+                     font=("Segoe UI Semibold", 9)
+                     ).pack(anchor="w", pady=(10, 4))
+
+        # HOTKEY
+        section_label("Hotkey")
+        hrow = tk.Frame(body, bg=self.BG_CARD)
+        hrow.pack(fill="x")
+        hk_val = tk.Label(hrow, text="—", bg=self.BG_CARD, fg=self.FG,
+                          font=("Segoe UI Semibold", 10))
+        hk_val.pack(side="left")
+        hk_change = tk.Label(hrow, text="Change", bg=self.BG_CARD, fg=self.ACCENT,
+                             cursor="hand2",
+                             font=("Segoe UI Semibold", 9, "underline"))
+        hk_change.pack(side="right")
+        hk_change.bind("<Enter>", lambda _e: hk_change.configure(fg=self.ACCENT_H))
+        hk_change.bind("<Leave>", lambda _e: hk_change.configure(fg=self.ACCENT))
+        hk_change.bind("<Button-1>",
+                       lambda _e: self._cb_hotkey and self._cb_hotkey())
+
+        # MODEL
+        section_label("Model")
+        mod_var = tk.StringVar(value="base")
+        mod_cb = ttk.Combobox(body, textvariable=mod_var, state="readonly",
+                              values=["tiny", "base", "small"], width=20)
+        mod_cb.pack(anchor="w", fill="x")
+        mod_cb.bind("<<ComboboxSelected>>",
+                    lambda _e: self._cb_model and self._cb_model(mod_var.get()))
+
+        # LANGUAGE
+        section_label("Language")
+        lang_var = tk.StringVar(value="en")
+        lang_cb = ttk.Combobox(
+            body, textvariable=lang_var, state="readonly",
+            values=["auto", "en", "ro", "fr", "de", "es", "it",
+                    "pt", "nl", "pl", "ja", "zh"],
+            width=20,
+        )
+        lang_cb.pack(anchor="w", fill="x")
+        lang_cb.bind("<<ComboboxSelected>>",
+                     lambda _e: self._cb_lang and self._cb_lang(lang_var.get()))
+
+        self._widgets["hk_val"] = hk_val
+        self._widgets["mod_var"] = mod_var
+        self._widgets["lang_var"] = lang_var
+
+    def _place_drawer(self, *, open_: bool, animate: bool = True) -> None:
+        if self._root is None or self._drawer is None:
+            return
+        W = self._root.winfo_width() or self.W
+        H = self._root.winfo_height() or self.H
+        target_x = W - self.DRAWER_W if open_ else W
+        current_x = self._drawer.winfo_x() if self._drawer.winfo_ismapped() else W
+
+        if not animate:
+            self._drawer.place(x=target_x, y=self.TITLE_H + 1,
+                               width=self.DRAWER_W,
+                               height=H - self.TITLE_H - 1)
+            self._drawer.lift()
+            return
+
+        def step(i=0, total=8):
+            t = i / total
+            e = 1 - (1 - t) ** 3         # ease-out cubic
+            x = int(current_x + (target_x - current_x) * e)
+            self._drawer.place(x=x, y=self.TITLE_H + 1,
+                               width=self.DRAWER_W,
+                               height=H - self.TITLE_H - 1)
+            self._drawer.lift()
+            if i < total:
+                self._root.after(14, lambda: step(i + 1, total))
+        step()
+
+    def _toggle_drawer(self) -> None:
+        if self._drawer_open:
+            self._close_drawer()
+        else:
+            self._open_drawer()
+
+    def _open_drawer(self) -> None:
+        self._drawer_open = True
+        self._place_drawer(open_=True)
+
+    def _close_drawer(self) -> None:
+        self._drawer_open = False
+        self._place_drawer(open_=False)
+
+    # ── Drawing / polling loop ────────────────────────────────────────────────
+
+    _STATE_COPY = {
+        "LOADING_MODEL": ("Loading",      "getting the model ready…"),
+        "IDLE":          ("Ready",        "hold Right Alt or click record"),
+        "RECORDING":     ("Recording",    "release to transcribe"),
+        "TRANSCRIBING":  ("Transcribing", "almost there…"),
     }
+
+    def _state_color(self, name: str) -> str:
+        return {
+            "LOADING_MODEL": self.CYAN,
+            "IDLE":          self.OK,
+            "RECORDING":     self.REC,
+            "TRANSCRIBING":  self.AMBER,
+        }.get(name, self.FG_DIM)
 
     def _tick(self) -> None:
         import math
         if self._root is None:
             return
         w = self._widgets
+        self._wave_phase += 1
 
-        # State
+        # ── State transitions ───────────────────────────────────────────
         st = self._get_state()
         st_name = getattr(st, "name", str(st))
-        color, hint = self._STATE_COLORS.get(st_name, ("#8a93a2", ""))
         if st_name != self._last_state:
             self._last_state = st_name
-            dot = w["dot"]
-            dot.delete("all")
-            dot.create_oval(2, 2, 14, 14, fill=color, outline="")
-            w["status"].config(text=st_name.replace("_", " "), fg=color)
-            w["hint"].config(text=hint)
-            if st_name == "RECORDING":
-                w["rec_btn"].config(
-                    text="■  Recording…  (release or click to stop)",
-                    bg="#ef4444", activebackground="#dc2626",
-                )
-            else:
-                w["rec_btn"].config(
-                    text="●  Click or hold Right Alt to record",
-                    bg=_UI_ACCENT, activebackground="#2563eb",
-                )
+            color = self._state_color(st_name)
+            label, hint = self._STATE_COPY.get(st_name, (st_name, ""))
 
-        # Config-driven labels
+            dot: tk.Canvas = w["dot"]
+            dot.delete("all")
+            dot.create_oval(0, 0, 12, 12, fill=color, outline="")
+
+            w["status"].configure(text=label, fg=color)
+            w["hint"].configure(
+                text=hint + (f"  ·  {self._get_config().get('hotkey','')}"
+                             if st_name == "IDLE" else ""),
+            )
+
+            # Record button label flips while recording
+            if st_name == "RECORDING":
+                w["rec_btn"].configure(text="\u25A0   Stop", bg=self.REC)
+                w["rec_btn"].bind("<Leave>",
+                                  lambda _e: w["rec_btn"].configure(bg=self.REC))
+                w["rec_btn"].bind("<Enter>",
+                                  lambda _e: w["rec_btn"].configure(bg="#ff6b60"))
+            else:
+                w["rec_btn"].configure(text="\u25CF   Record", bg=self.ACCENT)
+                w["rec_btn"].bind("<Leave>",
+                                  lambda _e: w["rec_btn"].configure(bg=self.ACCENT))
+                w["rec_btn"].bind("<Enter>",
+                                  lambda _e: w["rec_btn"].configure(bg=self.ACCENT_H))
+
+            # Waveform holder visibility
+            show_wave = st_name in ("RECORDING", "TRANSCRIBING")
+            holder = w["wave_holder"]
+            if show_wave and not holder.winfo_ismapped():
+                holder.pack(fill="x", side="top", after=w["dot"].master)
+            elif not show_wave and holder.winfo_ismapped():
+                holder.pack_forget()
+
+        # ── Config-driven labels (hotkey / model / language) ─────────────
         cfg = self._get_config() or {}
         hk = cfg.get("hotkey", "—")
         if hk != self._last_hotkey:
             self._last_hotkey = hk
-            w["hk_val"].config(text=hk)
+            if "hk_val" in w:
+                w["hk_val"].configure(text=hk)
+            # Also refresh hint line when idle so the hotkey stays current
+            if self._last_state == "IDLE":
+                w["hint"].configure(text=f"hold {hk} or click record")
         model = cfg.get("model", "base")
         if model != self._last_model:
             self._last_model = model
-            w["mod_var"].set(model)
+            if "mod_var" in w:
+                w["mod_var"].set(model)
         lang = cfg.get("language") or "auto"
         if lang != self._last_language:
             self._last_language = lang
-            w["lang_var"].set(lang)
+            if "lang_var" in w:
+                w["lang_var"].set(lang)
 
-        # Waveform
-        self._wave_phase += 1
-        wave = w["wave"]
-        wave.delete("all")
-        cw = int(wave.winfo_width()) or (self.W - 80)
-        ch = int(wave.winfo_height()) or 42
-        bars = 28
-        gap = 3
-        bw = max(2, (cw - gap * (bars - 1)) // bars)
-        if st_name == "RECORDING":
-            level = max(0.08, min(1.0, self._get_level()))
-            col = "#ef4444"
-        else:
-            level = 0.12
-            col = _UI_BG3
-        for i in range(bars):
-            amp = (0.25 + 0.75 * abs(math.sin(self._wave_phase / 3.0 + i * 0.7))) * level
-            bh = max(3, int(amp * (ch - 8)))
-            x = i * (bw + gap)
-            y0 = (ch - bh) // 2
-            wave.create_rectangle(x, y0, x + bw, y0 + bh, fill=col, outline="")
+        # ── Waveform (rolling smooth mirror curve) ───────────────────────
+        wave: tk.Canvas = w["wave"]
+        if w["wave_holder"].winfo_ismapped():
+            wave.delete("all")
+            cw = int(wave.winfo_width()) or (self.W - 36)
+            ch = int(wave.winfo_height()) or self.WAVE_H
+            cy = ch // 2
 
-        # History (update every ~1 s to keep it cheap)
+            # Roll the level buffer
+            live = 0.08
+            if self._last_state == "RECORDING":
+                live = max(0.10, min(1.0, self._get_level()))
+            self._levels.pop(0)
+            prev = self._levels[-1]
+            self._levels.append(prev + (live - prev) * 0.3)
+
+            col = self.REC if self._last_state == "RECORDING" else self.AMBER
+            n = len(self._levels)
+            step = cw / (n - 1)
+            max_amp = (ch - 4) / 2
+            top, bot = [], []
+            phase = self._wave_phase / 4.0
+            for i, v in enumerate(self._levels):
+                x = i * step
+                wiggle = 0.85 + 0.15 * math.sin(phase + i * 0.35)
+                a = v * max_amp * wiggle
+                top += [x, cy - a]
+                bot += [x, cy + a]
+            wave.create_line(*top, smooth=True, width=1.6,
+                             fill=col, capstyle="round", joinstyle="round")
+            wave.create_line(*bot, smooth=True, width=1.6,
+                             fill=col, capstyle="round", joinstyle="round")
+
+        # ── History refresh every ~1 s ───────────────────────────────────
         if self._wave_phase % 30 == 0:
             try:
                 entries = self._get_recent() or []
             except Exception:
                 entries = []
-            hist = w["hist"]
-            hist.delete(0, "end")
-            for e in entries[:10]:
-                ts = (e.get("ts") or "")[11:16]  # HH:MM
-                txt = (e.get("text") or "").replace("\n", " ")
-                if len(txt) > 60:
-                    txt = txt[:57] + "…"
-                hist.insert("end", f"{ts}   {txt}")
-            w["hist_data"] = entries[:10]
+            hist: tk.Listbox = w["hist"]
+            # Only redraw if the newest entry changed
+            data = w.get("hist_data") or []
+            newest_new = (entries[0].get("ts") if entries else None)
+            newest_old = (data[0].get("ts") if data else None)
+            if newest_new != newest_old or len(entries) != len(data):
+                hist.delete(0, "end")
+                for e in entries[:25]:
+                    ts = (e.get("ts") or "")[11:16]      # HH:MM
+                    txt = (e.get("text") or "").replace("\n", " ").strip()
+                    if len(txt) > 64:
+                        txt = txt[:62] + "…"
+                    hist.insert("end", f"  {ts}   {txt}")
+                w["hist_data"] = entries[:25]
 
-        wave.after(33, self._tick)
+        self._root.after(33, self._tick)
 
     # ── Public (thread-safe) ──────────────────────────────────────────────────
 
