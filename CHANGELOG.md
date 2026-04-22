@@ -5,6 +5,27 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.3 · 2026-04-22 — Overlay & dialogs actually render now
+
+### 🐛 Fixed
+- **Real root cause of the invisible overlay and invisible "Open full
+  history" window.** Since v0.3.0 the shared Tk interpreter root was
+  `withdraw()`-n — totally hidden. On Windows, Toplevels of a withdrawn
+  root (especially `overrideredirect` + layered `-alpha` windows) get
+  their HWND created and Tk reports them as mapped, but DWM never
+  actually composites them. The main window worked only because it
+  was a simple non-layered non-overrideredirect Toplevel.
+- Fix: stop withdrawing the root. Instead, size it 1 × 1, position it
+  at `-32000, -32000` (far off any reasonable screen), set `-alpha 0.0`
+  and `overrideredirect True`. It's invisible to the user but
+  "visible" to Win32 so owned Toplevels render correctly.
+- Overlay indicator is back. History window now opens where the user
+  can actually see it.
+
+### 🔭 Better diagnostics
+- `show_history_window()` and the tray "History…" click now log
+  breadcrumbs. Every history open path is traceable in `stt.log`.
+
 ## v0.3.2 · 2026-04-22 — Liquid-glass overlay, dialog focus, drawer drift
 
 ### 🎨 Design

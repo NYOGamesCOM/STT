@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -587,9 +587,20 @@ class UIManager:
             return
 
         self.root = tk.Tk()
-        # Hidden interpreter root — never shown. Everything real is a Toplevel.
-        self.root.withdraw()
         self.root.title("STT")
+        # DO NOT withdraw the root. On Windows, Toplevels of a withdrawn
+        # root (especially overrideredirect + -alpha layered windows) are
+        # created as HWNDs but never composited by DWM — Tk reports them
+        # as mapped but the user sees nothing. Instead, keep the root
+        # "visible" to Win32 but invisible to the user: 1×1, fully
+        # transparent, positioned far off any reasonable screen.
+        try:
+            self.root.geometry("1x1+-32000+-32000")
+            self.root.overrideredirect(True)   # strip chrome
+            self.root.attributes("-alpha", 0.0)
+            self.root.attributes("-topmost", False)
+        except Exception as exc:
+            log.debug("UI root stealth config skipped: %s", exc)
 
         # Shared base style — ttk 'clam' is the most themeable on Windows.
         try:
@@ -835,6 +846,7 @@ _UI_BORDER  = "#2f343d"
 
 def show_history_window(ui: UIManager) -> None:
     """Open the dark-themed transcription history browser (thread-safe)."""
+    log.info("show_history_window() called")
     ui.enqueue(lambda: _build_history_window(ui))
 
 
@@ -1055,6 +1067,7 @@ def _build_history_window(ui: UIManager) -> None:
     top.focus_force()
     top.attributes("-topmost", True)
     top.after(300, lambda: top.attributes("-topmost", False))
+    log.info("History Toplevel built at %s", top.geometry())
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2862,6 +2875,7 @@ class STTApp:
             self._show_whats_new(force=True)
 
         def _open_history(icon, item):
+            log.info("Tray 'History…' clicked")
             if self.ui is not None:
                 show_history_window(self.ui)
 
