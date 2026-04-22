@@ -5,6 +5,20 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.5 · 2026-04-22 — Cleaner overlay (bars, no chrome, no red rim)
+
+### 🎨 Design
+- Removed the ugly outer red aura ring around the pill — it looked like
+  a 2004 Winamp skin, not liquid glass.
+- Removed the pulsing halo around the status dot. It's now a single
+  small solid dot, like the record indicator on Voice Memos.
+- Replaced the continuous bezier waveform line (which read as "one flat
+  red stripe") with mirrored discrete bars — the Voice-Memos /
+  Siri-bars style. Each bar independently tracks an audio-level sample
+  so the whole row actually moves as you talk.
+- Slimmer proportions (186 × 30) and a lighter timer (9 pt, non-bold).
+- Kept the 1-px top shine for subtle glass depth. That's it.
+
 ## v0.3.4 · 2026-04-22 — Overlay actually visible (verified at the Win32 API level)
 
 ### 🐛 Fixed

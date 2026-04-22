@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -1442,23 +1442,18 @@ class Overlay:
     state change from other threads is marshalled via `root.after(0, ...)`.
     """
 
-    # Slightly taller so there's room for proper glass layering
-    W, H = 210, 36
-    MARGIN_BOTTOM = 54                   # Gap above taskbar
-    LEVELS_N = 64                        # Rolling waveform sample buffer
+    W, H = 186, 30                       # Thinner, more refined proportions
+    MARGIN_BOTTOM = 56                   # Gap above taskbar
+    LEVELS_N = 48                        # Waveform bar buffer
 
-    # Apple-ish "liquid glass" palette
-    # The pill is drawn slightly lighter than the window bg so its shape is
-    # actually visible. Then a 1-px top highlight gives the glass shine and
-    # a subtle darker inner border at the bottom gives depth.
-    BG          = "#07090d"              # window fill (near-black)
-    PILL        = "#171a24"              # pill body (a shade lighter)
-    PILL_EDGE   = "#222838"              # soft outer-edge line
-    HL_TOP      = "#323a52"              # top-half inner highlight (glass)
-    FG_DIM      = "#8a93a7"              # secondary label
-    FG_REC      = "#ff4a4a"              # recording red
-    FG_REC_GL   = "#ff7a7a"              # halo
-    FG_TRANS    = "#ffa94f"              # transcribing amber
+    # Minimal palette — one dark pill, one accent, one dim text.
+    BG          = "#07090d"              # window fill
+    PILL        = "#13151c"              # pill body (a hair lighter than BG)
+    HL_TOP      = "#2a3144"              # 1-px inner top highlight
+    FG_DIM      = "#8a93a7"              # timer text
+    FG_REC      = "#ff5050"              # recording red
+    FG_REC_GL   = "#ff8080"              # peak bar tips (unused, reserved)
+    FG_TRANS    = "#ffb968"              # transcribing amber
 
     def __init__(self, ui: UIManager, get_level):
         self._ui = ui
@@ -1559,28 +1554,21 @@ class Overlay:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw_pill(self) -> None:
-        """Liquid-glass pill: slightly-lighter body on the dark canvas,
-        1-px top-half highlight for the shine, subtle darker inner border."""
+        """Clean dark pill with a 1-px top shine. Nothing else."""
         c = self._canvas
         W, H = self.W, self.H
         r = H // 2
 
-        # Soft outer edge — faint lighter ring for the "glass" feel
-        c.create_oval(0, 0, 2 * r, H, fill=self.PILL_EDGE, outline="")
-        c.create_oval(W - 2 * r, 0, W, H, fill=self.PILL_EDGE, outline="")
-        c.create_rectangle(r, 0, W - r, H, fill=self.PILL_EDGE, outline="")
+        c.create_oval(0, 0, 2 * r, H, fill=self.PILL, outline="")
+        c.create_oval(W - 2 * r, 0, W, H, fill=self.PILL, outline="")
+        c.create_rectangle(r, 0, W - r, H, fill=self.PILL, outline="")
 
-        # Pill body inset by 1 px — this gives the 1-px outer edge ring
-        c.create_oval(1, 1, 2 * r - 1, H - 1, fill=self.PILL, outline="")
-        c.create_oval(W - 2 * r + 1, 1, W - 1, H - 1, fill=self.PILL, outline="")
-        c.create_rectangle(r, 1, W - r, H - 1, fill=self.PILL, outline="")
-
-        # Top-half highlight — the 1-px shine that sells the glass
-        c.create_arc(2, 2, 2 * r - 2, H - 2, start=30, extent=120,
+        # 1-px top highlight — subtle shine, nothing more
+        c.create_arc(1, 1, 2 * r - 1, H - 1, start=40, extent=100,
                      style="arc", outline=self.HL_TOP, width=1)
-        c.create_arc(W - 2 * r + 2, 2, W - 2, H - 2, start=30, extent=120,
+        c.create_arc(W - 2 * r + 1, 1, W - 1, H - 1, start=40, extent=100,
                      style="arc", outline=self.HL_TOP, width=1)
-        c.create_line(r, 2, W - r, 2, fill=self.HL_TOP)
+        c.create_line(r, 1, W - r, 1, fill=self.HL_TOP)
 
     def _tick(self) -> None:
         import math
@@ -1602,17 +1590,6 @@ class Overlay:
 
         self._draw_pill()
 
-        # Recording: subtle red aura around the pill edge (liquid-glass accent)
-        if st == "recording":
-            r = H // 2
-            aura = self._mix(self.PILL_EDGE, self.FG_REC, 0.35)
-            c.create_arc(0, 0, 2 * r, H, start=90, extent=180,
-                         style="arc", outline=aura, width=1)
-            c.create_arc(W - 2 * r, 0, W, H, start=270, extent=180,
-                         style="arc", outline=aura, width=1)
-            c.create_line(r, 0, W - r, 0,     fill=aura)
-            c.create_line(r, H - 1, W - r, H - 1, fill=aura)
-
         # Roll waveform buffer (smooth even when idle state flips to recording)
         live = 0.10
         if st == "recording":
@@ -1623,73 +1600,66 @@ class Overlay:
         eased = prev + (live - prev) * 0.35
         self._levels.append(eased)
 
-        # ── Left: pulsing state dot (single soft halo, iOS-ish) ──────────
-        dot_x = 14
+        # ── Left: tiny solid dot ─────────────────────────────────────────
+        dot_x = 12
         if st == "recording":
             color = self.FG_REC
-            pulse = 0.5 + 0.5 * math.sin(self._phase / 7.0)
-            core = 2.6 + pulse * 0.8
-            # One soft halo ring instead of three
-            rr = core + 3.2
-            halo = self._mix(self.BG, self.FG_REC_GL, 0.42 * (0.4 + pulse * 0.6))
-            c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
-                          outline=halo, width=1)
-            c.create_oval(dot_x - core, cy - core, dot_x + core, cy + core,
-                          fill=color, outline="")
         elif st == "transcribing":
             color = self.FG_TRANS
-            pulse = 0.5 + 0.5 * math.sin(self._phase / 5.5)
-            rr = 2.6 + pulse * 0.9
-            c.create_oval(dot_x - rr, cy - rr, dot_x + rr, cy + rr,
-                          fill=color, outline="")
+        else:
+            color = self.FG_DIM
+        c.create_oval(dot_x - 2.5, cy - 2.5, dot_x + 2.5, cy + 2.5,
+                      fill=color, outline="")
 
         # ── Right: elapsed timer (recording only) ─────────────────────────
-        right_edge = W - 13
+        right_edge = W - 10
         if st == "recording":
             elapsed = int(max(0, time.time() - self._rec_start))
             mm, ss = elapsed // 60, elapsed % 60
             c.create_text(
                 right_edge, cy, text=f"{mm}:{ss:02d}",
-                fill=self.FG_DIM, font=("Consolas", 9, "bold"),
+                fill=self.FG_DIM, font=("Consolas", 9),
                 anchor="e",
             )
-            right_edge -= 36
+            right_edge -= 32
 
-        # ── Center: waveform / dots ───────────────────────────────────────
-        wave_x0 = dot_x + 11
+        # ── Center: mirrored scrolling bars ──────────────────────────────
+        wave_x0 = dot_x + 9
         wave_x1 = right_edge - 6
-        wave_w = max(20, wave_x1 - wave_x0)
+        wave_w = max(30, wave_x1 - wave_x0)
 
         if st == "recording":
-            # Smooth mirrored curve, thinner line for a sleeker look
+            # Classic Voice-Memos-style mirrored bars. Latest audio level
+            # on the right; older samples drift left. Each bar grows/shrinks
+            # from a centred baseline so both halves mirror perfectly.
+            bar_w = 2
+            gap   = 2
+            bars  = max(8, wave_w // (bar_w + gap))
+            start = wave_x0 + (wave_w - (bars * bar_w + (bars - 1) * gap)) // 2
+            # Pick N samples evenly from the rolling buffer
             n = len(self._levels)
-            step = wave_w / (n - 1)
-            max_amp = (H - 12) / 2
-            top_pts: list[float] = []
-            bot_pts: list[float] = []
-            phase = self._phase / 4.0
-            for i, v in enumerate(self._levels):
-                x = wave_x0 + i * step
-                wiggle = 0.85 + 0.15 * math.sin(phase + i * 0.35)
-                a = v * max_amp * wiggle
-                top_pts += [x, cy - a]
-                bot_pts += [x, cy + a]
-            c.create_line(*top_pts, smooth=True, width=1.5,
-                          fill=self.FG_REC,
-                          capstyle="round", joinstyle="round")
-            c.create_line(*bot_pts, smooth=True, width=1.5,
-                          fill=self.FG_REC,
-                          capstyle="round", joinstyle="round")
+            stride = (n - 1) / (bars - 1) if bars > 1 else 0
+            max_h = (H - 10) / 2
+            for i in range(bars):
+                idx = int(i * stride)
+                v = self._levels[idx]
+                # Gentle minimum so the bars never fully collapse
+                h = max(1.2, v * max_h)
+                x = start + i * (bar_w + gap)
+                c.create_rectangle(
+                    x, cy - h, x + bar_w, cy + h,
+                    fill=self.FG_REC, outline="", width=0,
+                )
 
         elif st == "transcribing":
-            # Three breathing dots, tighter spacing
-            gap = 11
+            # Three eased breathing dots — minimal, no chrome
+            gap = 10
             mid_x = (wave_x0 + wave_x1) // 2
             for i in range(3):
                 px = mid_x + (i - 1) * gap
                 ph = self._phase / 6.0 + i * 0.7
                 amp = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(ph))
-                sz = 1.6 + amp * 1.8
+                sz = 1.4 + amp * 1.6
                 c.create_oval(px - sz, cy - sz, px + sz, cy + sz,
                               fill=self.FG_TRANS, outline="")
 
