@@ -245,6 +245,17 @@ Version-pinned URLs are also available at
 
 ---
 
+## Benchmarks
+
+We publish reproducible transcription benchmarks — latency, real-time
+factor, and word-error rate — for the `tiny`, `base`, and `small`
+models on CPU with int8 quantisation. The benchmark is a regular Python
+script; anyone can record their own reference clips and run it. See
+**[BENCHMARKS.md](BENCHMARKS.md)** for methodology, how to run it, and
+results.
+
+---
+
 ## Contributors
 
 - **[NYOGamesCOM](https://github.com/NYOGamesCOM)** — creator & maintainer
