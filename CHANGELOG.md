@@ -5,6 +5,29 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.2 · 2026-04-22 — Liquid-glass overlay, dialog focus, drawer drift
+
+### 🎨 Design
+- Overlay now has the Apple-ish liquid-glass look: a slightly-lighter
+  pill on the dark canvas (so the pill shape is actually visible), a
+  1-px top-half highlight for the glass shine, a soft outer edge ring,
+  and a faint red aura around the pill rim while recording.
+- Overlay alpha lowered to 0.92 for a touch of real transparency.
+- Pill grown by a hair (210 × 36) to make room for the new layering.
+
+### 🐛 Fixed
+- **"Open full history …" button did nothing.** It was firing correctly,
+  but the new history window opened *behind* the main window. Now
+  `lift()` + `focus_force()` + a 300 ms topmost flash guarantee it
+  surfaces. Same fix applied to the Set-Hotkey dialog.
+- **Settings drawer drifting into view when you dragged the window.**
+  The drawer's off-screen position was pinned to the initial window
+  width; resizing wider revealed it. Now the drawer always repositions
+  to the current right edge on every `<Configure>` event, whether it's
+  open or closed.
+- **Overlay topmost kept dropping** after the layered-window attribute
+  was set while withdrawn. Now re-asserted on every show transition.
+
 ## v0.3.1 · 2026-04-22 — Overlay visible again
 
 ### 🐛 Fixed

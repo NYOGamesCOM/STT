@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -726,6 +726,10 @@ def _build_hotkey_dialog(ui: UIManager, current: str, on_set) -> None:
     ttk.Button(btn_row, text="Cancel", command=top.destroy, width=10).pack(side="left", padx=6)
 
     top.protocol("WM_DELETE_WINDOW", top.destroy)
+    top.lift()
+    top.focus_force()
+    top.attributes("-topmost", True)
+    top.after(300, lambda: top.attributes("-topmost", False))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1044,6 +1048,13 @@ def _build_history_window(ui: UIManager) -> None:
     refresh_list()
     search_entry.focus_set()
     top.protocol("WM_DELETE_WINDOW", top.destroy)
+
+    # Make absolutely sure the window is on top — otherwise it can open
+    # behind the main window and look like the button did nothing.
+    top.lift()
+    top.focus_force()
+    top.attributes("-topmost", True)
+    top.after(300, lambda: top.attributes("-topmost", False))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1418,20 +1429,23 @@ class Overlay:
     state change from other threads is marshalled via `root.after(0, ...)`.
     """
 
-    W, H = 200, 32                       # Thinner, more elegant proportions
-    MARGIN_BOTTOM = 52                   # Gap above taskbar
+    # Slightly taller so there's room for proper glass layering
+    W, H = 210, 36
+    MARGIN_BOTTOM = 54                   # Gap above taskbar
     LEVELS_N = 64                        # Rolling waveform sample buffer
 
-    # iOS-inspired palette
-    BG        = "#0a0c10"                # near-black, slightly warmer
-    HL        = "#1b2029"                # 1-px inner top highlight
-    FG_DIM    = "#6e6e73"                # iOS secondary label
-    FG_REC    = "#ff453a"                # iOS systemRed (dark)
-    FG_REC_GL = "#ff6b62"                # halo
-    FG_TRANS  = "#ff9f0a"                # iOS systemOrange (dark)
-    FG_LOAD   = "#0a84ff"                # iOS systemBlue (dark)
-    # Windows transparency key — any pixel this exact color becomes see-through
-    KEY       = "#ff00ff"
+    # Apple-ish "liquid glass" palette
+    # The pill is drawn slightly lighter than the window bg so its shape is
+    # actually visible. Then a 1-px top highlight gives the glass shine and
+    # a subtle darker inner border at the bottom gives depth.
+    BG          = "#07090d"              # window fill (near-black)
+    PILL        = "#171a24"              # pill body (a shade lighter)
+    PILL_EDGE   = "#222838"              # soft outer-edge line
+    HL_TOP      = "#323a52"              # top-half inner highlight (glass)
+    FG_DIM      = "#8a93a7"              # secondary label
+    FG_REC      = "#ff4a4a"              # recording red
+    FG_REC_GL   = "#ff7a7a"              # halo
+    FG_TRANS    = "#ffa94f"              # transcribing amber
 
     def __init__(self, ui: UIManager, get_level):
         self._ui = ui
@@ -1442,7 +1456,6 @@ class Overlay:
         self._phase = 0
         self._rec_start = 0.0
         self._levels: list[float] = [0.0] * self.LEVELS_N
-        self._transparent_ok = False
         self._pending_state: str | None = None  # if set_state arrives before _build
 
         ui.enqueue(self._build)
@@ -1459,14 +1472,9 @@ class Overlay:
         top.attributes("-topmost", True)
         top.attributes("-alpha", 0.0)
 
-        # Solid dark background. Previous versions tried `-transparentcolor`
-        # for real rounded transparent corners — but that attribute is
-        # unreliable on a Toplevel (vs the old per-window Tk root), so on
-        # some machines it silently rendered a hot-pink rectangle. A solid
-        # dark bg is drawn directly behind the pill; the bounding rect is
-        # visually indistinguishable from the pill at 96 % alpha.
+        # Solid dark background, pill drawn lighter on top — no
+        # `-transparentcolor` trickery (unreliable on a Toplevel).
         top.configure(bg=self.BG)
-        self._transparent_ok = False
 
         sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
         x = (sw - self.W) // 2
@@ -1526,19 +1534,28 @@ class Overlay:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw_pill(self) -> None:
+        """Liquid-glass pill: slightly-lighter body on the dark canvas,
+        1-px top-half highlight for the shine, subtle darker inner border."""
         c = self._canvas
         W, H = self.W, self.H
         r = H // 2
-        # Pill body
-        c.create_oval(0, 0, 2 * r, H, fill=self.BG, outline="")
-        c.create_oval(W - 2 * r, 0, W, H, fill=self.BG, outline="")
-        c.create_rectangle(r, 0, W - r, H, fill=self.BG, outline="")
-        # 1-px inner top highlight — the "glass" shine
-        c.create_arc(1, 1, 2 * r - 1, H - 1, start=45, extent=90,
-                     style="arc", outline=self.HL, width=1)
-        c.create_arc(W - 2 * r + 1, 1, W - 1, H - 1, start=45, extent=90,
-                     style="arc", outline=self.HL, width=1)
-        c.create_line(r, 1, W - r, 1, fill=self.HL)
+
+        # Soft outer edge — faint lighter ring for the "glass" feel
+        c.create_oval(0, 0, 2 * r, H, fill=self.PILL_EDGE, outline="")
+        c.create_oval(W - 2 * r, 0, W, H, fill=self.PILL_EDGE, outline="")
+        c.create_rectangle(r, 0, W - r, H, fill=self.PILL_EDGE, outline="")
+
+        # Pill body inset by 1 px — this gives the 1-px outer edge ring
+        c.create_oval(1, 1, 2 * r - 1, H - 1, fill=self.PILL, outline="")
+        c.create_oval(W - 2 * r + 1, 1, W - 1, H - 1, fill=self.PILL, outline="")
+        c.create_rectangle(r, 1, W - r, H - 1, fill=self.PILL, outline="")
+
+        # Top-half highlight — the 1-px shine that sells the glass
+        c.create_arc(2, 2, 2 * r - 2, H - 2, start=30, extent=120,
+                     style="arc", outline=self.HL_TOP, width=1)
+        c.create_arc(W - 2 * r + 2, 2, W - 2, H - 2, start=30, extent=120,
+                     style="arc", outline=self.HL_TOP, width=1)
+        c.create_line(r, 2, W - r, 2, fill=self.HL_TOP)
 
     def _tick(self) -> None:
         import math
@@ -1559,6 +1576,17 @@ class Overlay:
         cy = H // 2
 
         self._draw_pill()
+
+        # Recording: subtle red aura around the pill edge (liquid-glass accent)
+        if st == "recording":
+            r = H // 2
+            aura = self._mix(self.PILL_EDGE, self.FG_REC, 0.35)
+            c.create_arc(0, 0, 2 * r, H, start=90, extent=180,
+                         style="arc", outline=aura, width=1)
+            c.create_arc(W - 2 * r, 0, W, H, start=270, extent=180,
+                         style="arc", outline=aura, width=1)
+            c.create_line(r, 0, W - r, 0,     fill=aura)
+            c.create_line(r, H - 1, W - r, H - 1, fill=aura)
 
         # Roll waveform buffer (smooth even when idle state flips to recording)
         live = 0.10
@@ -1676,15 +1704,19 @@ class Overlay:
         if state == "hidden":
             self._fade(0.0, -0.14)
         else:
-            if prev == "hidden":
-                try:
-                    self._top.deiconify()
-                    self._top.lift()
-                    self._top.attributes("-topmost", True)
-                except Exception as exc:
-                    log.debug("Overlay deiconify failed: %s", exc)
-            self._fade(0.96, 0.20)
-        log.info("Overlay state: %s -> %s", prev, state)
+            try:
+                self._top.deiconify()
+                self._top.lift()
+                # Re-assert topmost — Windows sometimes drops it after
+                # the attribute is set while the window is withdrawn.
+                self._top.attributes("-topmost", False)
+                self._top.attributes("-topmost", True)
+            except Exception as exc:
+                log.debug("Overlay deiconify failed: %s", exc)
+            self._fade(0.92, 0.20)   # slightly less opaque for glass feel
+        log.info("Overlay state: %s -> %s  (mapped=%s)",
+                 prev, state,
+                 bool(self._top.winfo_ismapped()) if self._top else "?")
 
     def set_state(self, state: str) -> None:
         """Thread-safe. state: 'hidden' | 'recording' | 'transcribing'."""
@@ -1911,8 +1943,11 @@ class MainWindow:
     def _on_configure(self, event) -> None:
         if event.widget is not self._top:
             return
-        if self._drawer_open:
-            self._place_drawer(open_=True, animate=False)
+        # Always re-place the drawer based on the current window geometry.
+        # Previously we only did this while the drawer was open, which caused
+        # it to drift into view when the user resized the window wider than
+        # the initial geometry (the drawer's x was pinned to the old width).
+        self._place_drawer(open_=self._drawer_open, animate=False)
 
     # ── Status strip + waveform ───────────────────────────────────────────────
 
