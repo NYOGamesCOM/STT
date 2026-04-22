@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -1459,29 +1459,30 @@ class Overlay:
         top.attributes("-topmost", True)
         top.attributes("-alpha", 0.0)
 
-        # Try true transparent corners (Windows). Fallback: opaque pill.
-        try:
-            top.configure(bg=self.KEY)
-            top.attributes("-transparentcolor", self.KEY)
-            self._transparent_ok = True
-        except Exception:
-            top.configure(bg=self.BG)
-            self._transparent_ok = False
+        # Solid dark background. Previous versions tried `-transparentcolor`
+        # for real rounded transparent corners — but that attribute is
+        # unreliable on a Toplevel (vs the old per-window Tk root), so on
+        # some machines it silently rendered a hot-pink rectangle. A solid
+        # dark bg is drawn directly behind the pill; the bounding rect is
+        # visually indistinguishable from the pill at 96 % alpha.
+        top.configure(bg=self.BG)
+        self._transparent_ok = False
 
         sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
         x = (sw - self.W) // 2
         y = sh - self.H - self.MARGIN_BOTTOM
         top.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
-        canvas_bg = self.KEY if self._transparent_ok else self.BG
         canvas = tk.Canvas(
-            top, width=self.W, height=self.H, bg=canvas_bg,
+            top, width=self.W, height=self.H, bg=self.BG,
             highlightthickness=0, bd=0,
         )
         canvas.pack(fill="both", expand=True)
 
         self._top = top
         self._canvas = canvas
+        log.info("Overlay built at %dx%d+%d+%d (alpha=0, withdrawn)",
+                 self.W, self.H, x, y)
 
         # Click-through + hide from Alt-Tab (Windows)
         try:
@@ -1676,8 +1677,14 @@ class Overlay:
             self._fade(0.0, -0.14)
         else:
             if prev == "hidden":
-                self._top.deiconify()
+                try:
+                    self._top.deiconify()
+                    self._top.lift()
+                    self._top.attributes("-topmost", True)
+                except Exception as exc:
+                    log.debug("Overlay deiconify failed: %s", exc)
             self._fade(0.96, 0.20)
+        log.info("Overlay state: %s -> %s", prev, state)
 
     def set_state(self, state: str) -> None:
         """Thread-safe. state: 'hidden' | 'recording' | 'transcribing'."""

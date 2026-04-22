@@ -5,6 +5,22 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.1 · 2026-04-22 — Overlay visible again
+
+### 🐛 Fixed
+- **Bottom-centre overlay indicator is back.** v0.3.0 converted the
+  overlay from its own `Tk()` root to a `Toplevel` of the shared UI
+  root — which silently broke `-transparentcolor` (Windows' transparent
+  key attribute is only reliable on top-level `Tk()` windows, not on
+  `Toplevel` children). On affected machines the pill rendered as a
+  hot-pink rectangle that didn't look like an indicator at all; on
+  others it just didn't show. Dropped the transparent-corner trick in
+  favour of a solid dark background — the pill still looks clean, just
+  with a tight rectangular boundary indistinguishable from the pill at
+  96 % alpha.
+- Overlay now logs every show/hide transition and its initial geometry
+  to `stt.log` so future overlay bugs can be diagnosed from the log.
+
 ## v0.3.0 · 2026-04-21 — UI architecture rewrite (one Tk, one thread)
 
 This release fixes the two bugs that plagued v0.2.x — "Show window" that
