@@ -41,7 +41,7 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 APP_DIR = _app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "stt.log"
@@ -1505,23 +1505,35 @@ class Overlay:
         log.info("Overlay built at %dx%d+%d+%d (alpha=0, withdrawn)",
                  self.W, self.H, x, y)
 
-        # Click-through + hide from Alt-Tab (Windows)
+        # Click-through + hide from Alt-Tab (Windows).
+        #
+        # Historical bug: we used `top.winfo_id()` as the target, which
+        # returns the *inner* Tk frame HWND, not the Win32 top-level. OR-ing
+        # WS_EX_LAYERED onto that inner frame made Windows treat it as a
+        # layered window with no layered attributes (no alpha, no colour
+        # key) — which renders FULLY TRANSPARENT. Everything the canvas
+        # drew was then discarded by the compositor, and the user saw
+        # nothing, even though Tk reported the window as mapped.
+        #
+        # Fix: apply click-through ONLY to the root Win32 HWND (via
+        # GetAncestor(GA_ROOT)), and do NOT add WS_EX_LAYERED ourselves —
+        # Tk's `-alpha` attribute already sets it on the right HWND with
+        # the correct layered-window attributes.
         try:
             import ctypes
-            hwnd = top.winfo_id()
-            parent = ctypes.windll.user32.GetParent(hwnd)
-            if parent:
-                hwnd = parent
+            GA_ROOT = 2
+            hwnd_inner = top.winfo_id()
+            hwnd_root = ctypes.windll.user32.GetAncestor(hwnd_inner, GA_ROOT)
+            if not hwnd_root:
+                hwnd_root = hwnd_inner
             GWL_EXSTYLE = -20
-            WS_EX_LAYERED     = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
             WS_EX_TOOLWINDOW  = 0x00000080
             WS_EX_NOACTIVATE  = 0x08000000
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ex = ctypes.windll.user32.GetWindowLongW(hwnd_root, GWL_EXSTYLE)
             ctypes.windll.user32.SetWindowLongW(
-                hwnd, GWL_EXSTYLE,
-                ex | WS_EX_LAYERED | WS_EX_TRANSPARENT
-                   | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                hwnd_root, GWL_EXSTYLE,
+                ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             )
         except Exception as exc:
             log.debug("Click-through setup failed: %s", exc)

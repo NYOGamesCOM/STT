@@ -5,6 +5,32 @@ semantic-ish versioning and this file is the source of truth for what
 each tag shipped. The release workflow pulls the section for the tag
 into the GitHub Release body and the in-app update dialog.
 
+## v0.3.4 · 2026-04-22 — Overlay actually visible (verified at the Win32 API level)
+
+### 🐛 Fixed
+- **Overlay indicator was invisible because of a bug in *our* click-through
+  setup**, not the Tk root state. Confirmed by probing the actual HWND
+  state with `ctypes` — no more guessing:
+  - `Overlay._build`'s ctypes call used `top.winfo_id()` as the target,
+    which returns the *inner* Tk frame HWND, not the Win32 top-level.
+  - We then OR-ed `WS_EX_LAYERED` onto that inner frame.
+  - A layered window with no `SetLayeredWindowAttributes` or
+    `UpdateLayeredWindow` call is rendered as **fully transparent** by
+    the DWM compositor — everything we drew on the canvas was silently
+    dropped, even though Tk reported `mapped=True`.
+  - Meanwhile, Tk's own `-alpha` attribute correctly set layered
+    attributes on the *root* HWND (alpha=235, topmost, etc.) — so the
+    wrapper behaved correctly, it was just invisible.
+- **Fix**: apply click-through flags (`WS_EX_TRANSPARENT`,
+  `WS_EX_TOOLWINDOW`, `WS_EX_NOACTIVATE`) to the root HWND via
+  `GetAncestor(hwnd, GA_ROOT)`, and stop adding `WS_EX_LAYERED`
+  ourselves. Verified via a Win32 API probe that the inner frame is no
+  longer layered and the root keeps `alpha=235`, `topmost=True`.
+- This was the bug all the way back from v0.3.0. Several "fixes" before
+  this one (dropping `-transparentcolor`, un-withdrawing the root,
+  adding the `lift()` dance) turned out to treat symptoms rather than
+  the real cause.
+
 ## v0.3.3 · 2026-04-22 — Overlay & dialogs actually render now
 
 ### 🐛 Fixed
